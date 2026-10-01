@@ -1,0 +1,4 @@
+interface:
+  display_name: "audio-to-text"
+  short_description: "把本地音频批量转成文字稿，上传OSS后调用阿里云百炼语音识别API"
+  default_prompt: "使用 $audio-to-text 完成它所解决的任务，并按可观察标准检查结果。"
