@@ -6,7 +6,7 @@
 
 | Skill | 能力 | 目录 |
 |---|---|---|
-| **audio-to-text** | 本地音频批量转文字稿（上传OSS → 百炼语音识别 → 输出.md，断点续传） | `skills/audio-to-text/` |
+| **audio-to-text** | 本地音频批量转文字稿（上传百炼文件服务，无需OSS → 百炼语音识别 → 输出.doc，断点续传） | `skills/audio-to-text/` |
 
 ## 安装（一条命令装全部）
 
@@ -33,9 +33,19 @@ lotuser1/Susan_Skill/                      # 仓库根
 
 ## 如何使用某个 Skill
 
+### 方式一：在客户端里直接说（由 Agent 调用）
 安装后，直接对支持 Agent Skills 的客户端说：
 
 - 转写音频：`使用 $audio-to-text 完成它所解决的任务，并按可观察标准检查结果。`
+
+### 方式二：自己手动跑（推荐，可批量配置）
+1. 进入 `skills/audio-to-text/` 目录
+2. `cp config.env.example config.env`，用文本编辑器填入你的百炼 Key 和要处理的文件夹（`INPUT_DIRS`）
+3. `python3 -m pip install requests`（只需一次）
+4. `bash run.sh` —— 会自动批量转写 `INPUT_DIRS` 里的所有文件夹
+
+### ⚠️ 给别人用的关键提醒
+本仓库**不含任何 Key**（`config.env` 已被忽略，不会上传）。别人安装后，**必须用自己的阿里云百炼账号申请 Key** 填进自己的 `config.env`，不能用你的。完整步骤见 `skills/audio-to-text/SKILL.md`。
 
 每个 Skill 的详细用法见其所在目录的 `SKILL.md`。
 

@@ -48,14 +48,20 @@ description: 把本地音频文件批量转成文字稿：上传到百炼自有�
 只需配置一个必填项，输出目录与站点可选：
 
 ```bash
-# 必填：阿里云百炼 API Key
+# 必填：阿里云百炼 API Key（只能用你自己的，不能共用别人的）
 export DASHSCOPE_API_KEY="sk-你的百炼Key"
+
+# 必填（批量）：要处理的文件夹，多个用逗号分隔
+export INPUT_DIRS="/Users/你/音频文件夹A,/Users/你/音频文件夹B"
 
 # 可选：转写文稿输出目录；不填则自动存到音频所在目录
 export OUTPUT_DIR="/path/to/your/output"
 
 # 可选：输出格式 doc(默认) / md / both
 export OUTPUT_FORMAT="doc"
+
+# 可选：语言 auto(自动)/cn/en/yue/fspk…，默认 auto
+export TRANSCRIBE_LANG="auto"
 
 # 可选：服务站点。国内站默认 https://dashscope.aliyuncs.com ；
 # 国际站（密钥以 sk-ws- 开头多为国际站）必须填下面这行：
@@ -105,6 +111,52 @@ python3 scripts/transcribe.py --file /path/to/single.mp3
 | `--ext` | 指定扩展名，逗号分隔 | 常见音频格式 |
 | `--lang` | 语言：auto(自动)/cn/en/yue/fspk | auto |
 | `--overwrite` | 覆盖已存在的文字稿 | 关闭（跳过） |
+
+## 批量配置（推荐给非技术用户）
+
+不用每次敲命令。把要处理的文件夹和输出位置写进 `config.env`，然后只运行一行：
+
+1. 复制模板：`cp config.env.example config.env`
+2. 用文本编辑器打开 `config.env`，填好这几项：
+   - `DASHSCOPE_API_KEY`：你的百炼 Key（**改 API Key 就是改这一行**）
+   - `INPUT_DIRS`：要处理的文件夹路径，多个用半角逗号 `,` 隔开（**批量配置就改这里**）
+   - `OUTPUT_DIR`：想统一存到哪里（不填就存在音频旁边）
+   - `OUTPUT_FORMAT`：默认 `doc`
+3. 在 Terminal 进入本目录，运行：
+   ```bash
+   bash run.sh
+   ```
+   run.sh 会自动读取 config.env，把 `INPUT_DIRS` 里的每个文件夹都跑一遍。
+
+> 想临时只处理某一个文件夹，不改动 config.env，也可以直接：
+> `bash run.sh --dir /某个/具体/目录`
+
+## 修改 / 更换 API Key 怎么改
+
+直接编辑 `config.env` 里的 `DASHSCOPE_API_KEY="..."` 这一行，换成新申请的 Key，保存即可。
+下次运行 `bash run.sh` 会用新 Key。
+
+**安全提醒**：`config.env` 已被 `.gitignore` 忽略，不会被上传到 GitHub，可以放心放本地 Key；
+千万不要把它加进 git（`git add config.env`）或分享出去。需要对外共享时，只发 `config.env.example` 模板。
+
+## 他人（同事/朋友）如何使用这个 Skill
+
+本 Skill 不绑定任何人的 Key，**别人必须用自己的阿里云百炼账号 Key**。步骤：
+
+1. 安装：在支持 Agent Skills 的客户端里执行
+   ```bash
+   npx -y skills add lotuser1/Susan_Skill -g --all
+   ```
+2. 找到安装后的 skill 目录（一般在用户目录下的 skills 文件夹里的 `audio-to-text/`），复制模板：
+   ```bash
+   cp config.env.example config.env
+   ```
+3. 编辑 `config.env`：填 **自己的** `DASHSCOPE_API_KEY`、`INPUT_DIRS`（要处理的文件夹）、`OUTPUT_DIR`。
+4. 安装依赖（只需一次）：
+   ```bash
+   python3 -m pip install requests
+   ```
+5. 运行：在本目录执行 `bash run.sh`。
 
 ## 关键行为与边界
 

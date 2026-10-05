@@ -229,7 +229,13 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
 # ---------- 主流程 ----------
 def main() -> int:
     parser = argparse.ArgumentParser(description="批量转写本地音频为文字稿（无需 OSS）")
-    parser.add_argument("--dir", type=Path, help="音频目录（批量）")
+    parser.add_argument(
+        "--dir",
+        action="append",
+        default=[],
+        type=Path,
+        help="要处理的音频目录；可多次使用以批量处理多个文件夹（也可用 config.env 的 INPUT_DIRS）",
+    )
     parser.add_argument("--file", type=Path, help="单个音频文件")
     parser.add_argument(
         "--output-dir",
@@ -263,7 +269,7 @@ def main() -> int:
         fmt = "doc"
 
     if not args.dir and not args.file:
-        parser.error("必须提供 --dir 或 --file")
+        parser.error("必须提供至少一个 --dir 或 --file")
 
     # 解析输出目录：命令行 > 环境变量 > 音频同目录
     out_dir = None
@@ -280,11 +286,12 @@ def main() -> int:
     files: list[Path] = []
     if args.file:
         files = [args.file.resolve()]
-    else:
-        if not args.dir.is_dir():
-            print(f"目录不存在: {args.dir}", file=sys.stderr)
+    for d in args.dir:
+        d = d.resolve()
+        if not d.is_dir():
+            print(f"目录不存在: {d}", file=sys.stderr)
             return 2
-        files = list_audio_files(args.dir.resolve(), exts)
+        files.extend(list_audio_files(d, exts))
 
     if not files:
         print("没有找到匹配的音频文件。")
