@@ -63,6 +63,10 @@ export OUTPUT_FORMAT="doc"
 # 可选：语言 auto(自动)/cn/en/yue/fspk…，默认 auto
 export TRANSCRIBE_LANG="auto"
 
+# 可选：识别模型。qwen3-asr-flash-filetrans(默认,最准) / paraformer-v2(最便宜) / paraformer-8k-v2(电话8k)
+# 不填=默认最准模型；想省钱改成下面这行：
+export ASR_MODEL="paraformer-v2"
+
 # 可选：服务站点。国内站默认 https://dashscope.aliyuncs.com ；
 # 国际站（密钥以 sk-ws- 开头多为国际站）必须填下面这行：
 export DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com"

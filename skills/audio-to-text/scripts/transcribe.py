@@ -50,8 +50,12 @@ SUPPORTED_EXT = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".amr", ".wma", ".opus",
 }
 
-# 识别模型（异步长文件转写，支持最长 12 小时录音）
-MODEL = "qwen3-asr-flash-filetrans"
+# 识别模型（异步长文件转写，支持最长 12 小时录音）。
+# 可在 config.env 用 ASR_MODEL 覆盖：
+#   qwen3-asr-flash-filetrans  → 默认，最准确，国内约 0.00022 元/秒
+#   paraformer-v2              → 最便宜，国内约 0.00008 元/秒（医美方言语种略弱）
+#   paraformer-8k-v2           → 电话录音等 8k 采样场景
+MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash-filetrans")
 
 # 百炼 API 地址（默认国内站；国际站账号通过环境变量 DASHSCOPE_BASE_URL 切换）
 BASE_URL = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com").rstrip("/")
