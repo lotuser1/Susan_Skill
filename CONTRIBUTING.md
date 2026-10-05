@@ -61,7 +61,7 @@ git commit -m "feat: 新增 your-skill-name 技能"
 2. **凭证不写死**：所有 Key 走环境变量，绝不入库。
 3. **隐私边界**：本地样本、密钥、运行记录、私密内容绝不提交。
 4. **每个 Skill 都要能通过结构校验**才提交。
-5. **一条命令装全部**：新增 Skill 后，别人的安装命令 `npx -y skills add lotuser1/songzi -g --all` 无需改动，自动包含新 Skill。
+5. **一条命令装全部**：新增 Skill 后，别人的安装命令 `npx -y skills add lotuser1/Susan_Skill -g --all` 无需改动，自动包含新 Skill。
 
 ## 检查清单（提交前）
 

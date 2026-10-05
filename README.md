@@ -11,15 +11,15 @@
 ## 安装（一条命令装全部）
 
 ```bash
-npx -y skills add lotuser1/songzi -g --all
+npx -y skills add lotuser1/Susan_Skill -g --all
 ```
 
-> 这是你的真实安装命令：GitHub 用户名 `lotuser1`，仓库 `songzi`。此命令会安装仓库 `skills/` 下**所有** Skill，以后新增的 Skill 也会一并被装上，安装命令不用改。
+> 这是你的真实安装命令：GitHub 用户名 `lotuser1`，仓库 `Susan_Skill`。此命令会安装仓库 `skills/` 下**所有** Skill，以后新增的 Skill 也会一并被装上，安装命令不用改。
 
 ## 仓库结构
 
 ```text
-lotuser1/songzi/                      # 仓库根
+lotuser1/Susan_Skill/                      # 仓库根
 ├── README.md                        # 本说明（安装 + 使用）
 ├── CONTRIBUTING.md                  # 如何新增一个 Skill（给维护者/你自己）
 ├── .gitignore
