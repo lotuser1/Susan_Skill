@@ -1,11 +1,11 @@
 ---
 name: audio-to-text
-description: 把本地音频文件批量转成文字稿：上传OSS后调用阿里云百炼语音识别API，逐个转写、断点续传、输出Markdown。用户有大量本地音频(本地/网盘下载后)需要变成文字稿以做知识库时使用。
+description: 把本地音频文件批量转成文字稿：上传到百炼自有文件服务后调用阿里云百炼语音识别API，逐个转写、断点续传、输出文字稿（默认 .doc，可配为 .md / both）。用户有大量本地音频(本地/网盘下载后)需要变成文字稿以做知识库时使用。无需配置OSS。
 ---
 
 # audio-to-text
 
-把本地音频文件批量转成文字稿（.md），供后续做成知识库。
+把本地音频文件批量转成文字稿（默认 `.doc`，可配置为 `.md` / `both`），供后续做成知识库。
 
 ## 一句话定义
 
@@ -25,12 +25,11 @@ description: 把本地音频文件批量转成文字稿：上传OSS后调用阿�
 
 ```
 本地音频文件
-   ↓ 上传
-阿里云 OSS（生成临时公网 URL）
-   ↓ 提交异步任务
-百炼语音识别 API（qwen3-asr-flash-filetrans）
+   ↓ 上传到百炼自有文件服务（无需 OSS）
+   ↓ 换取临时可下载 URL
+百炼语音识别 API（qwen3-asr-flash-filetrans，异步）
    ↓ 轮询
-识别结果 → 提取文本 → 保存为同名 .md
+识别结果 → 提取文本 → 保存为同名 .doc（默认；可用 --format 改为 .md / both）
 ```
 
 核心脚本：`scripts/transcribe.py`
@@ -38,27 +37,35 @@ description: 把本地音频文件批量转成文字稿：上传OSS后调用阿�
 ## 使用前提（必须满足）
 
 1. **已开通**阿里云百炼语音识别服务，并拿到 **API Key**（`DASHSCOPE_API_KEY`）。
-2. **已有**阿里云 OSS 存储空间（Bucket），并拿到 AccessKey（`OSS_ACCESS_KEY_ID` / `OSS_ACCESS_KEY_SECRET` / `OSS_BUCKET` / `OSS_ENDPOINT`）。
-3. 音频文件**已在本地**（百度网盘的音频需先下载到本地，API 无法读取网盘）。
+2. 音频文件**已在本地**（网盘音频需先下载到本地，API 无法读取网盘）。
 
-以上凭证都通过**环境变量**提供，**绝不写进代码**。这也是发布给其他人时，对方各自配置自己 Key 的通用方式。
+**本 Skill 不依赖对象存储 OSS**：本地音频会先上传到百炼自有的文件服务获取临时托管 URL，再提交转写，无需你开通或配置任何 OSS 资源。
+
+所有凭证通过**环境变量**提供，**绝不写进代码**。这也是发布给其他人时，对方各自配置自己 Key 的通用方式。
 
 ## 环境变量配置
 
-在运行前，把下面变量写进系统环境变量（Windows 用 `set`，macOS/Linux 用 `export`）：
+只需配置一个必填项，输出目录与站点可选：
 
 ```bash
+# 必填：阿里云百炼 API Key
 export DASHSCOPE_API_KEY="sk-你的百炼Key"
-export OSS_ACCESS_KEY_ID="你的AccessKeyId"
-export OSS_ACCESS_KEY_SECRET="你的AccessKeySecret"
-export OSS_BUCKET="你的Bucket名"
-export OSS_ENDPOINT="oss-cn-hangzhou.aliyuncs.com"   # 按你OSS所在地域改
+
+# 可选：转写文稿输出目录；不填则自动存到音频所在目录
+export OUTPUT_DIR="/path/to/your/output"
+
+# 可选：输出格式 doc(默认) / md / both
+export OUTPUT_FORMAT="doc"
+
+# 可选：服务站点。国内站默认 https://dashscope.aliyuncs.com ；
+# 国际站（密钥以 sk-ws- 开头多为国际站）必须填下面这行：
+export DASHSCOPE_BASE_URL="https://dashscope-intl.aliyuncs.com"
 ```
 
-依赖安装：
+依赖安装（本机只需一次，仅需 requests）：
 
 ```bash
-pip install requests oss2
+python3 -m pip install requests
 ```
 
 ## 用法
@@ -70,8 +77,16 @@ python3 scripts/transcribe.py --dir /path/to/audio
 ```
 
 - 自动处理目录下所有常见音频（mp3/wav/m4a/aac/flac/ogg/amr/wma/opus）
-- 每个音频旁边生成同名 `.md` 文字稿
-- **已存在 .md 的自动跳过**，断点续传，重跑不重复花钱
+- 每个音频生成同名 `.doc` 文字稿（可用 `--format md` / `--format both` 变更）
+- **已存在同名文字稿的自动跳过**，断点续传，重跑不重复花钱
+
+### 指定输出目录（文稿统一存放）
+
+```bash
+python3 scripts/transcribe.py --dir /path/to/audio --output-dir /path/to/output
+```
+
+输出目录也可写进环境变量 `OUTPUT_DIR`，一次配置长期生效，无需每次在命令行加 `--output-dir`。
 
 ### 转写单个文件
 
@@ -85,14 +100,16 @@ python3 scripts/transcribe.py --file /path/to/single.mp3
 |---|---|---|
 | `--dir` | 批量处理目录 | 必填（与 --file 二选一） |
 | `--file` | 处理单个文件 | 必填（与 --dir 二选一） |
+| `--output-dir` | 转写文稿输出目录（也可用环境变量 OUTPUT_DIR） | 音频所在目录 |
+| `--format` | 输出格式：doc(默认)/md/both（也可用环境变量 OUTPUT_FORMAT） | doc |
 | `--ext` | 指定扩展名，逗号分隔 | 常见音频格式 |
-| `--lang` | 语言：cn/en/yue/fspk | cn |
+| `--lang` | 语言：auto(自动)/cn/en/yue/fspk | auto |
 | `--overwrite` | 覆盖已存在的文字稿 | 关闭（跳过） |
 
 ## 关键行为与边界
 
-- **只读不删**：不改动、不删除你的原始音频，只在旁边新增 `.md`。
-- **断点续传**：已生成 `.md` 的音频自动跳过；转写失败会在运行时标出，可用 `--overwrite` 重试单个。
+- **只读不删**：不改动、不删除你的原始音频，只在旁边新增 `.doc`（或按 `--format` 指定的格式）。
+- **断点续传**：已生成文字稿的音频自动跳过；转写失败会在运行时标出，可用 `--overwrite` 重试单个。
 - **凭证不硬编码**：所有 Key 走环境变量；若检测到缺少凭证，脚本会明确报错并提示配置。
 - **安全边界**：不读取密钥文件、不上传非音频文件、不把原始音频内容外发到除阿里云以外的第三方。
 

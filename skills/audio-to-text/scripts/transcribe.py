@@ -1,120 +1,150 @@
 #!/usr/bin/env python3
 """
-audio-to-text 核心脚本
-==========================
-把本地音频文件批量转成文字稿。
+audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
+=================================================
+把本地音频文件批量转成文字稿，供后续做成知识库。
 
-流程：本地音频 → 上传阿里云 OSS（生成公网 URL）→ 调用百炼语音识别 API（qwen3-asr-flash-filetrans）→ 轮询结果 → 保存同名 .md 文字稿。
+默认输出 `.doc`（与你本地已有的文档格式统一）；也可通过 --format 设为
+.md / both。
+
+流程：本地音频 → 上传到百炼文件服务(非 OSS) 拿到 file_id → 换取可下载的
+签名 URL → 调用百炼语音识别 API（qwen3-asr-flash-filetrans，异步）→ 轮询
+结果 → 保存为同名文字稿到本地目录。
 
 关键特性：
 - 批量：遍历目录下所有支持的音频文件
-- 断点续传：已存在同名 .md 的音频自动跳过，下次继续跑不重复花钱
-- 环境变量鉴权：API Key 和 OSS 凭证都从环境变量读取，不写死
+- 断点续传：已存在同名文字稿的音频自动跳过，下次继续跑不重复花钱
+- 不依赖对象存储 OSS：音频直接上传到百炼自有文件服务，用户无需开通/配置 OSS
+- 输出格式可配置：--format 或环境变量 OUTPUT_FORMAT，支持 doc(默认)/md/both
+- 输出路径可配置：--output-dir 或环境变量 OUTPUT_DIR；不配置则存到音频同目录
+- 站点可配置：国内站默认；国际站账号填 DASHSCOPE_BASE_URL 即可
 
 所需环境变量：
-  DASHSCOPE_API_KEY        阿里云百炼 API Key（必填）
-  OSS_ACCESS_KEY_ID        阿里云 AccessKey ID（必填）
-  OSS_ACCESS_KEY_SECRET    阿里云 AccessKey Secret（必填）
-  OSS_BUCKET               目标 OSS Bucket 名称（必填）
-  OSS_ENDPOINT             OSS Endpoint，如 oss-cn-hangzhou.aliyuncs.com（必填）
+  DASHSCOPE_API_KEY    阿里云百炼 API Key（必填）
+  DASHSCOPE_BASE_URL   服务站点（可选，默认 https://dashscope.aliyuncs.com；
+                        国际站填 https://dashscope-intl.aliyuncs.com）
+  OUTPUT_DIR           转写文稿输出目录（可选，默认与音频同目录）
+  OUTPUT_FORMAT        输出格式 doc/md/both（可选，默认 doc）
+
+依赖安装（只需 requests）：
+  python3 -m pip install requests
 
 用法：
   python3 transcribe.py --dir /path/to/audio
   python3 transcribe.py --file /path/to/single.mp3
-  python3 transcribe.py --dir /path/to/audio --ext ".mp3,.m4a,.wav"
-  python3 transcribe.py --dir /path/to/audio --lang en
+  python3 transcribe.py --dir /path/to/audio --output-dir /path/to/output
+  python3 transcribe.py --dir /path/to/audio --format doc   # 默认即 doc
+  python3 transcribe.py --dir /path/to/audio --ext ".mp3,.m4a" --lang en
 """
 
 import argparse
-import json
 import os
-import re
 import sys
 import time
-import urllib.parse
 from pathlib import Path
+
+import requests
 
 # 支持的音频扩展名
 SUPPORTED_EXT = {
     ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".amr", ".wma", ".opus",
 }
 
-# 识别模型
+# 识别模型（异步长文件转写，支持最长 12 小时录音）
 MODEL = "qwen3-asr-flash-filetrans"
 
-# 百炼 API（北京地域）
-API_SUBMIT = "https://dashscope.aliyuncs.com/api/v1/tasks"
-API_QUERY = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+# 百炼 API 地址（默认国内站；国际站账号通过环境变量 DASHSCOPE_BASE_URL 切换）
+BASE_URL = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com").rstrip("/")
+API_FILE_UPLOAD = f"{BASE_URL}/api/v1/files"
+API_FILE_GET = f"{BASE_URL}/api/v1/files/{{file_id}}"
+API_SUBMIT = f"{BASE_URL}/api/v1/services/audio/asr/transcription"
+API_QUERY = f"{BASE_URL}/api/v1/tasks/{{task_id}}"
+
+# 扩展名 → MIME（上传时携带，便于服务端识别）
+MIME = {
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".amr": "audio/amr", ".wma": "audio/x-ms-wma", ".opus": "audio/opus",
+}
 
 
-# ---------- OSS 上传 ----------
-def upload_to_oss(local_path: Path, key: str) -> str:
-    """上传文件到 OSS，返回一个临时可公网访问的 URL。"""
-    access_id = os.environ.get("OSS_ACCESS_KEY_ID")
-    access_secret = os.environ.get("OSS_ACCESS_KEY_SECRET")
-    bucket_name = os.environ.get("OSS_BUCKET")
-    endpoint = os.environ.get("OSS_ENDPOINT")
-
-    if not all([access_id, access_secret, bucket_name, endpoint]):
+def _auth_headers() -> dict:
+    api_key = os.environ.get("DASHSCOPE_API_KEY")
+    if not api_key:
         raise RuntimeError(
-            "缺少 OSS 凭证。请设置环境变量：OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_BUCKET, OSS_ENDPOINT"
+            "缺少 DASHSCOPE_API_KEY。请先在 config.env（或环境变量）里配置百炼 API Key。"
         )
+    return {"Authorization": f"Bearer {api_key}"}
 
-    import oss2
 
-    auth = oss2.Auth(access_id, access_secret)
-    bucket = oss2.Bucket(auth, endpoint, bucket_name)
-    bucket.put_object_from_file(key, str(local_path))
+# ---------- 上传到百炼文件服务（替代 OSS） ----------
+def upload_to_dashscope(local_path: Path) -> str:
+    """上传本地音频到百炼文件服务，返回可下载的签名 URL（无需 OSS）。"""
+    headers = _auth_headers()
+    mime = MIME.get(local_path.suffix.lower(), "application/octet-stream")
 
-    # 生成 1 小时的临时签名 URL，供转写服务下载
-    url = bucket.sign_url("GET", key, 60 * 60)
+    # 1) 上传拿 file_id
+    with open(local_path, "rb") as f:
+        resp = requests.post(
+            API_FILE_UPLOAD,
+            headers=headers,
+            files={"file": (local_path.name, f, mime)},
+            data={"purpose": "inference"},
+            timeout=120,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"上传到百炼失败 HTTP {resp.status_code}: {resp.text[:300]}")
+    body = resp.json()
+    up = (body.get("output") or body.get("data") or {})
+    fid = (up.get("uploaded_files") or [{}])[0].get("file_id")
+    if not fid:
+        raise RuntimeError(f"上传成功但未返回 file_id：{body}")
+
+    # 2) 换取可下载的签名 URL（ASR 接口只接受真实 URL，不接受 file_id）
+    g = requests.get(API_FILE_GET.format(file_id=fid), headers=headers, timeout=30)
+    if g.status_code != 200:
+        raise RuntimeError(f"获取文件 URL 失败 HTTP {g.status_code}: {g.text[:300]}")
+    gbody = g.json()
+    url = (gbody.get("output") or gbody.get("data") or {}).get("url")
+    if not url:
+        raise RuntimeError(f"未返回可下载 URL：{gbody}")
     return url
 
 
 # ---------- 转写任务 ----------
-def submit_transcription(file_url: str, lang: str = "cn") -> str:
+def submit_transcription(file_url: str, lang: str = "auto") -> str:
     """提交异步转写任务，返回 task_id。"""
-    import requests
-
-    api_key = os.environ.get("DASHSCOPE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "缺少 DASHSCOPE_API_KEY。请先设置环境变量（阿里云百炼控制台获取）。"
-        )
-
+    _auth_headers()  # 仅做密钥存在性检查
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        **_auth_headers(),
         "Content-Type": "application/json",
         "X-DashScope-Async": "enable",
     }
+    # channel_id=[0] 识别第 1 条音轨；enable_itn=False 保留原始读法
+    params = {"channel_id": [0], "enable_itn": False}
+    # auto/cn/zh 走自动识别，避免误伤；其余语种显式指定
+    if lang and lang not in ("auto", "cn", "zh"):
+        params["language"] = lang
+
     payload = {
         "model": MODEL,
         "input": {"file_url": file_url},
-        "parameters": {
-            "language_hints": [lang] if lang else [],
-        },
+        "parameters": params,
     }
-
     resp = requests.post(API_SUBMIT, headers=headers, json=payload, timeout=30)
     if resp.status_code != 200:
-        raise RuntimeError(f"提交转写失败 HTTP {resp.status_code}: {resp.text}")
-
+        raise RuntimeError(f"提交转写失败 HTTP {resp.status_code}: {resp.text[:400]}")
     data = resp.json()
-    if data.get("code") not in (None, 200, 0):
+    if data.get("code") not in (None, 200, 0, "None", ""):
         raise RuntimeError(f"提交转写报错: {data}")
-
-    task_id = data["output"]["task_id"]
-    return task_id
+    return data["output"]["task_id"]
 
 
-def query_transcription(task_id: str, api_key: str, timeout_s: int = 1800) -> dict:
+def query_transcription(task_id: str, timeout_s: int = 1800) -> dict:
     """轮询转写任务直至完成，返回完整任务结果。"""
-    import requests
-
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = _auth_headers()
     url = API_QUERY.format(task_id=task_id)
     deadline = time.time() + timeout_s
-
     while time.time() < deadline:
         try:
             resp = requests.get(url, headers=headers, timeout=30)
@@ -127,104 +157,123 @@ def query_transcription(task_id: str, api_key: str, timeout_s: int = 1800) -> di
             print(f"  查询异常：{exc}，重试中...", file=sys.stderr)
             time.sleep(5)
             continue
-
         status = data.get("output", {}).get("task_status", "")
         if status == "SUCCEEDED":
             return data
         if status == "FAILED":
-            raise RuntimeError(f"转写任务失败: {data.get('output', {}).get('message', '未知')}")
-        if status == "RUNNING" or status == "PENDING":
-            time.sleep(5)
-            continue
-
-        print(f"  未知状态 {status}，继续等待...", file=sys.stderr)
+            raise RuntimeError(
+                f"转写任务失败: {data.get('output', {}).get('message', '未知')}"
+            )
         time.sleep(5)
-
     raise TimeoutError(f"转写任务 {task_id} 超时（{timeout_s}s）")
 
 
 # ---------- 结果转文字 ----------
 def extract_text(result: dict) -> str:
-    """从转写结果 JSON 中提取正文文本。"""
-    output = result.get("output", {})
-    results = output.get("results", [])
-    texts = []
-    for item in results:
-        url = item.get("url")
-        if not url:
-            continue
-        texts.append(_download_result_text(url))
-    return "\n\n".join(text for text in texts if text)
+    """从转写结果中提取正文文本。
 
-
-def _download_result_text(url: str) -> str:
-    import requests
-
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    transcript = data.get("transcript", "")
-    # transcript 可能是字符串或带 words 的结构，做兼容
-    if isinstance(transcript, str):
-        return transcript
-    if isinstance(transcript, dict):
-        return transcript.get("text", "")
-    return ""
+    真实结构：result.output.result.transcription_url → 该 URL 指向的 JSON 含
+    {"transcripts": [{"channel_id":0, "text": "..."}, ...]}
+    """
+    transcription_url = (
+        result.get("output", {}).get("result", {}).get("transcription_url")
+    )
+    if not transcription_url:
+        raise RuntimeError("结果中未找到 transcription_url")
+    data = requests.get(transcription_url, timeout=60).json()
+    parts = []
+    for tr in data.get("transcripts", []) or []:
+        txt = tr.get("text")
+        if txt:
+            parts.append(txt.strip())
+    return "\n\n".join(parts).strip()
 
 
 # ---------- 辅助 ----------
-def make_oss_key(local_path: Path) -> str:
-    """生成 OSS 对象键，避免重名，保留可读性。"""
-    safe_name = re.sub(r"[^\w\-.]", "_", local_path.stem)
-    return f"audio-to-text/{safe_name}-{int(time.time())}{local_path.suffix}"
-
-
 def list_audio_files(directory: Path, exts: set) -> list[Path]:
-    return sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    return sorted(
+        p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in exts
+    )
 
 
-def target_md(audio: Path) -> Path:
-    return audio.with_suffix(".md")
+def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: str) -> None:
+    # 根据输出格式决定生成哪些文件
+    targets: list[Path] = []
+    if fmt in ("doc", "both"):
+        targets.append(out_dir / (audio.stem + ".doc"))
+    if fmt in ("md", "both"):
+        targets.append(out_dir / (audio.stem + ".md"))
 
-
-def transcribe_one(audio: Path, lang: str, overwrite: bool) -> None:
-    md = target_md(audio)
-    if md.exists() and not overwrite:
-        print(f"[跳过] {audio.name}（文字稿已存在）")
+    if targets and all(t.exists() for t in targets) and not overwrite:
+        names = "、".join(t.name for t in targets)
+        print(f"[跳过] {audio.name}（文字稿已存在：{names}）")
         return
 
     print(f"[处理] {audio.name} ...")
-    key = make_oss_key(audio)
-    url = upload_to_oss(audio, key)
-    print(f"  已上传 OSS，开始转写...")
+    url = upload_to_dashscope(audio)
+    print("  已上传到百炼，开始转写...")
 
     task_id = submit_transcription(url, lang=lang)
-    api_key = os.environ["DASHSCOPE_API_KEY"]
-    result = query_transcription(task_id, api_key)
+    result = query_transcription(task_id)
 
     text = extract_text(result)
     if not text:
         raise RuntimeError(f"{audio.name} 转写结果为空")
 
-    md.write_text(text, encoding="utf-8")
-    print(f"  ✓ 已生成 {md.name}（{len(text)} 字）")
+    for t in targets:
+        t.write_text(text, encoding="utf-8")
+    names = "、".join(t.name for t in targets)
+    print(f"  ✓ 已生成 {names}（{len(text)} 字）→ {out_dir}")
 
 
 # ---------- 主流程 ----------
 def main() -> int:
-    parser = argparse.ArgumentParser(description="批量转写本地音频为文字稿")
+    parser = argparse.ArgumentParser(description="批量转写本地音频为文字稿（无需 OSS）")
     parser.add_argument("--dir", type=Path, help="音频目录（批量）")
     parser.add_argument("--file", type=Path, help="单个音频文件")
-    parser.add_argument("--ext", default=",".join(sorted(SUPPORTED_EXT)),
-                        help="支持的扩展名，逗号分隔，默认常见音频格式")
-    parser.add_argument("--lang", default="cn",
-                        help="语言：cn/en/yue/fspk，默认 cn")
-    parser.add_argument("--overwrite", action="store_true",
-                        help="覆盖已存在的文字稿（默认跳过）")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="转写文稿输出目录（默认：音频所在目录；也可用环境变量 OUTPUT_DIR）",
+    )
+    parser.add_argument(
+        "--ext",
+        default=",".join(sorted(SUPPORTED_EXT)),
+        help="支持的扩展名，逗号分隔，默认常见音频格式",
+    )
+    parser.add_argument(
+        "--lang",
+        default="auto",
+        help="语言：auto(自动)/cn/en/yue/fspk…，默认 auto",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", help="覆盖已存在的文字稿（默认跳过）"
+    )
+    parser.add_argument(
+        "--format",
+        choices=["md", "doc", "both"],
+        default=None,
+        help="输出格式：doc(默认,与本地已有.doc统一) / md / both；也可用环境变量 OUTPUT_FORMAT",
+    )
     args = parser.parse_args()
+
+    # 输出格式：命令行 > 环境变量 OUTPUT_FORMAT > 默认 doc
+    fmt = (args.format or os.environ.get("OUTPUT_FORMAT", "doc")).lower()
+    if fmt not in ("md", "doc", "both"):
+        fmt = "doc"
 
     if not args.dir and not args.file:
         parser.error("必须提供 --dir 或 --file")
+
+    # 解析输出目录：命令行 > 环境变量 > 音频同目录
+    out_dir = None
+    if args.output_dir:
+        out_dir = args.output_dir.expanduser().resolve()
+    elif os.environ.get("OUTPUT_DIR"):
+        out_dir = Path(os.environ["OUTPUT_DIR"]).expanduser().resolve()
+    if out_dir:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"输出目录：{out_dir}")
 
     exts = {e.strip().lower() for e in args.ext.split(",") if e.strip()}
 
@@ -242,11 +291,11 @@ def main() -> int:
         return 0
 
     print(f"共 {len(files)} 个音频待处理。")
-
     ok, fail = 0, 0
     for audio in files:
+        od = out_dir if out_dir else audio.parent
         try:
-            transcribe_one(audio, args.lang, args.overwrite)
+            transcribe_one(audio, args.lang, args.overwrite, od, fmt)
             ok += 1
         except Exception as exc:
             print(f"  ✗ {audio.name} 失败：{exc}", file=sys.stderr)
