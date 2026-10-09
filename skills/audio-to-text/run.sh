@@ -48,4 +48,31 @@ if [ ${#ARGS[@]} -eq 0 ] && [ -z "$*" ]; then
 fi
 
 echo ">>> 开始转写（站点：${DASHSCOPE_BASE_URL:-国内站默认}）"
-python3 "$SCRIPT_DIR/scripts/transcribe.py" "${ARGS[@]}" "$@"
+
+# 解析一个「已安装 requests」的 python，避免裸 python3 缺依赖直接报错。
+# 顺序：① 系统 python3 → ② 本地 .venv → ③ 自动建 .venv 安装 → ④ 本机已有托管 venv 兜底
+PY=""
+if python3 -c "import requests" 2>/dev/null; then
+  PY="python3"
+elif [ -x "$SCRIPT_DIR/.venv/bin/python" ] && "$SCRIPT_DIR/.venv/bin/python" -c "import requests" 2>/dev/null; then
+  PY="$SCRIPT_DIR/.venv/bin/python"
+else
+  for cand in "$SCRIPT_DIR/.venv/bin/python" "/Users/songzi/.workbuddy/binaries/python/envs/default/bin/python3"; do
+    if [ -x "$cand" ] && "$cand" -c "import requests" 2>/dev/null; then
+      PY="$cand"; break
+    fi
+  done
+fi
+if [ -z "$PY" ]; then
+  echo ">>> 检测到缺少 requests，正在创建本地虚拟环境并安装（首次稍慢）..."
+  if python3 -m venv "$SCRIPT_DIR/.venv" 2>/dev/null && "$SCRIPT_DIR/.venv/bin/pip" install -q requests 2>/dev/null; then
+    PY="$SCRIPT_DIR/.venv/bin/python"
+  fi
+fi
+if [ -z "$PY" ]; then
+  echo "无法自动准备 Python 运行环境。请手动执行：python3 -m pip install requests" >&2
+  exit 1
+fi
+echo ">>> 使用解释器：$PY"
+
+"$PY" "$SCRIPT_DIR/scripts/transcribe.py" "${ARGS[@]}" "$@"

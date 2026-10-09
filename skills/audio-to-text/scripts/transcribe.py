@@ -87,28 +87,24 @@ def upload_to_dashscope(local_path: Path) -> str:
     headers = _auth_headers()
     mime = MIME.get(local_path.suffix.lower(), "application/octet-stream")
 
-    # 1) 上传拿 file_id
+    # 1) 上传拿 file_id（带重试，避免批量高并发下被限流导致整文件失败）
     with open(local_path, "rb") as f:
-        resp = requests.post(
+        body = _post_json(
             API_FILE_UPLOAD,
             headers=headers,
             files={"file": (local_path.name, f, mime)},
             data={"purpose": "inference"},
             timeout=120,
+            stage="上传到百炼",
         )
-    if resp.status_code != 200:
-        raise RuntimeError(f"上传到百炼失败 HTTP {resp.status_code}: {resp.text[:300]}")
-    body = resp.json()
     up = (body.get("output") or body.get("data") or {})
     fid = (up.get("uploaded_files") or [{}])[0].get("file_id")
     if not fid:
         raise RuntimeError(f"上传成功但未返回 file_id：{body}")
 
     # 2) 换取可下载的签名 URL（ASR 接口只接受真实 URL，不接受 file_id）
-    g = requests.get(API_FILE_GET.format(file_id=fid), headers=headers, timeout=30)
-    if g.status_code != 200:
-        raise RuntimeError(f"获取文件 URL 失败 HTTP {g.status_code}: {g.text[:300]}")
-    gbody = g.json()
+    gbody = _get_json(API_FILE_GET.format(file_id=fid), headers=headers, timeout=30,
+                     stage="获取文件URL")
     url = (gbody.get("output") or gbody.get("data") or {}).get("url")
     if not url:
         raise RuntimeError(f"未返回可下载 URL：{gbody}")
@@ -135,10 +131,8 @@ def submit_transcription(file_url: str, lang: str = "auto") -> str:
         "input": {"file_url": file_url},
         "parameters": params,
     }
-    resp = requests.post(API_SUBMIT, headers=headers, json=payload, timeout=30)
-    if resp.status_code != 200:
-        raise RuntimeError(f"提交转写失败 HTTP {resp.status_code}: {resp.text[:400]}")
-    data = resp.json()
+    data = _post_json(API_SUBMIT, headers=headers, json=payload, timeout=30,
+                     stage="提交转写")
     if data.get("code") not in (None, 200, 0, "None", ""):
         raise RuntimeError(f"提交转写报错: {data}")
     return data["output"]["task_id"]
@@ -173,6 +167,58 @@ def query_transcription(task_id: str, timeout_s: int = 1800) -> dict:
 
 
 # ---------- 结果转文字 ----------
+def _get_json(url: str, headers=None, timeout: int = 60, tries: int = 5,
+             stage: str = "获取数据") -> dict:
+    """带重试的 JSON GET。
+
+    - 4xx（欠费/限流/鉴权）立即抛出，交给上层处理（欠费不要再重试浪费时间）
+    - 其余网络/解析错误（含返回非 JSON）按指数退避重试
+    """
+    last_err = None
+    for i in range(tries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            if resp.status_code != 200:
+                last_err = f"{stage} HTTP {resp.status_code}: {resp.text[:200]}"
+                if 400 <= resp.status_code < 500:
+                    raise RuntimeError(last_err)
+                time.sleep(3 * (i + 1))
+                continue
+            return resp.json()
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            last_err = f"{stage} 异常：{exc}"
+            time.sleep(3 * (i + 1))
+            continue
+    raise RuntimeError(f"{stage} 失败（已重试 {tries} 次）：{last_err}")
+
+
+def _post_json(url: str, headers=None, files=None, data=None, json=None,
+              timeout: int = 120, tries: int = 4, stage: str = "提交数据") -> dict:
+    """带重试的 JSON POST。4xx 立即抛出（欠费/鉴权），其余网络/解析错误退避重试。"""
+    last_err = None
+    for i in range(tries):
+        try:
+            resp = requests.post(
+                url, headers=headers, files=files, data=data, json=json, timeout=timeout
+            )
+            if resp.status_code != 200:
+                last_err = f"{stage} HTTP {resp.status_code}: {resp.text[:300]}"
+                if 400 <= resp.status_code < 500:
+                    raise RuntimeError(last_err)
+                time.sleep(3 * (i + 1))
+                continue
+            return resp.json()
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            last_err = f"{stage} 异常：{exc}"
+            time.sleep(3 * (i + 1))
+            continue
+    raise RuntimeError(f"{stage} 失败（已重试 {tries} 次）：{last_err}")
+
+
 def extract_text(result: dict) -> str:
     """从转写结果中提取正文文本。
 
@@ -184,7 +230,8 @@ def extract_text(result: dict) -> str:
     )
     if not transcription_url:
         raise RuntimeError("结果中未找到 transcription_url")
-    data = requests.get(transcription_url, timeout=60).json()
+    # 结果文件可能较大或受网络波动影响，带重试拉取，避免“转写成功却没存下”
+    data = _get_json(transcription_url, timeout=60, stage="拉取转写结果")
     parts = []
     for tr in data.get("transcripts", []) or []:
         txt = tr.get("text")
@@ -285,6 +332,19 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"输出目录：{out_dir}")
 
+    # 进度日志：每处理一个文件就追加一行，方便额度耗尽后知道转到了哪、下次从哪续
+    log_path = os.environ.get("PROGRESS_LOG")
+    if not log_path:
+        base = out_dir if out_dir else Path.cwd()
+        log_path = str(base / "transcribe_progress.log")
+    log_f = open(log_path, "a", encoding="utf-8")
+    print(f"进度日志：{log_path}")
+
+    def log_line(status: str, audio: Path, note: str = "") -> None:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_f.write(f"{ts}\t{status}\t{audio}\t{note}\n")
+        log_f.flush()
+
     exts = {e.strip().lower() for e in args.ext.split(",") if e.strip()}
 
     files: list[Path] = []
@@ -303,15 +363,46 @@ def main() -> int:
 
     print(f"共 {len(files)} 个音频待处理。")
     ok, fail = 0, 0
-    for audio in files:
+    stopped_for_quota = False
+    # 每处理完一个文件后的间隔（秒），避免短时间大量请求触发百炼限流；可用环境变量 REQUEST_INTERVAL 调整
+    REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2"))
+    # 额度/余额/账号未开通/限流相关的关键词：命中即判定为“充钱才能继续”，主动停止整批
+    QUOTA_KEYWORDS = (
+        "nobalance", "balance", "额度", "余额", "insufficient", "quota",
+        "paymentrequired", "402", "accountbalance", "accountnotactivated", "未开通",
+        "accountnotexist", "nocode", "forbidden", "arrearage", "overdue",
+        "access denied", "throttling", "throttled",
+    )
+    for idx, audio in enumerate(files, 1):
         od = out_dir if out_dir else audio.parent
         try:
             transcribe_one(audio, args.lang, args.overwrite, od, fmt)
             ok += 1
+            log_line("OK", audio)
         except Exception as exc:
+            msg = str(exc)
+            log_line("FAIL", audio, msg[:240])
+            # 判断是否为额度/余额耗尽/限流：是则停止整批，避免对剩下上千个文件逐个重试浪费时间
+            if any(k in msg.lower() for k in QUOTA_KEYWORDS):
+                print(f"\n⚠️  检测到额度/余额不足或账号未开通/限流（{msg[:200]}）")
+                print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
+                print(f"    本次停止于文件：{audio.name}")
+                print(f"    👉 下次充值后，重新运行相同命令即可；已生成的 .doc 会自动跳过，")
+                print(f"       脚本会从「{audio.name}」继续转写。")
+                stopped_for_quota = True
+                break
             print(f"  ✗ {audio.name} 失败：{exc}", file=sys.stderr)
             fail += 1
+        # 限速间隔：跳过已处理/失败的文件，降低触发限流的概率
+        if idx < len(files):
+            time.sleep(REQUEST_INTERVAL)
 
+    if log_f:
+        log_f.close()
+
+    if stopped_for_quota:
+        # 返回码 2 表示“额度耗尽主动停止”，便于外层脚本判断
+        return 2
     print(f"\n完成：成功 {ok}，失败 {fail}。失败项可用 --overwrite 重试。")
     return 0 if fail == 0 else 1
 
