@@ -395,8 +395,28 @@ def recover_bulk(base_url: str, api_key: str, model: str, out_dir: Path,
                 print(f"  [{i}/{len(task_ids)}] {tid} 无 transcription_url，跳过")
                 fail += 1
                 continue
-            content = requests.get(urls[0], timeout=60).content
-            (out_dir / f"{tid}.json").write_bytes(content)
+            # 下载结果 JSON（OSS 直链；部分网络环境下偶尔返回空响应，做一次重试）
+            content = b""
+            for attempt in range(2):
+                try:
+                    content = requests.get(urls[0], timeout=60).content
+                    if content:
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            if not content:
+                print(f"  [{i}/{len(task_ids)}] {tid} 下载结果为空，跳过", file=sys.stderr)
+                fail += 1
+                continue
+            # 已存在且非空的同名文件跳过，便于分多次运行累计、不重复下载
+            jpath = out_dir / f"{tid}.json"
+            if jpath.exists() and jpath.stat().st_size > 0:
+                ok += 1
+                if i % 50 == 0:
+                    print(f"  已处理 {i}/{len(task_ids)}（含跳过已有）")
+                continue
+            jpath.write_bytes(content)
             # 尝试从 JSON 抽取纯文本，方便直接阅读/搜索
             try:
                 j = json.loads(content)
