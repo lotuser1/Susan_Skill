@@ -18,6 +18,8 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
 - 输出格式可配置：--format 或环境变量 OUTPUT_FORMAT，支持 doc(默认)/md/both
 - 输出路径可配置：--output-dir 或环境变量 OUTPUT_DIR；不配置则存到音频同目录
 - 站点可配置：国内站默认；国际站账号填 DASHSCOPE_BASE_URL 即可
+- 续取能力：自动记录 文件名↔task_id，额度耗尽或结果未落盘时，可在阿里云 24 小时
+  留存窗口内用 --recover 把已转写的文稿重新拉回（需仍在 24h 内）
 
 所需环境变量：
   DASHSCOPE_API_KEY    阿里云百炼 API Key（必填）
@@ -35,9 +37,11 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
   python3 transcribe.py --dir /path/to/audio --output-dir /path/to/output
   python3 transcribe.py --dir /path/to/audio --format doc   # 默认即 doc
   python3 transcribe.py --dir /path/to/audio --ext ".mp3,.m4a" --lang en
+  python3 transcribe.py --recover          # 续取：把 task_index.csv 里已转写但没存下的文稿拉回来（限提交后 24h 内）
 """
 
 import argparse
+import csv
 import os
 import sys
 import time
@@ -158,6 +162,8 @@ def query_transcription(task_id: str, timeout_s: int = 1800) -> dict:
         status = data.get("output", {}).get("task_status", "")
         if status == "SUCCEEDED":
             return data
+        if status == "UNKNOWN":
+            raise RuntimeError("任务不存在或已超期(UNKNOWN)")
         if status == "FAILED":
             raise RuntimeError(
                 f"转写任务失败: {data.get('output', {}).get('message', '未知')}"
@@ -240,6 +246,61 @@ def extract_text(result: dict) -> str:
     return "\n\n".join(parts).strip()
 
 
+# ---------- 续取：额度耗尽/结果未落盘时，从已记录的 task_id 拉回结果 ----------
+def recover_from_index(index_path: str, out_dir: Path, fmt: str) -> int:
+    """读取 task_index.csv，把『已提交转写、但本地还没生成文稿』的任务，
+    在阿里云 24 小时留存窗口内重新拉回结果并落盘。
+
+    适用场景：
+      - 上次批量跑到一半额度耗尽，部分已转写的文稿没存下来；
+      - 上次因网络/限流导致“转写成功却没存下”。
+    注意：阿里云只保留任务结果 24 小时，超期后 task_id 失效、无法找回。
+    """
+    p = Path(index_path)
+    if not p.exists():
+        print(f"未找到 {index_path}，无法续取。请先用普通模式跑过一次（会生成该文件）。")
+        return 1
+    rows = []
+    with open(p, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    if not rows:
+        print("task_index.csv 为空，没有可续取的任务。")
+        return 0
+    print(f"读取到 {len(rows)} 条任务记录，开始续取（仅处理本地尚未生成文稿的）...")
+    ok = skipped = failed = 0
+    for r in rows:
+        fname = r.get("filename") or ""
+        tid = r.get("task_id") or ""
+        if not fname or not tid:
+            continue
+        targets = []
+        if fmt in ("doc", "both"):
+            targets.append(out_dir / (Path(fname).stem + ".doc"))
+        if fmt in ("md", "both"):
+            targets.append(out_dir / (Path(fname).stem + ".md"))
+        if targets and all(t.exists() for t in targets):
+            skipped += 1
+            continue
+        print(f"[续取] {fname} (task_id={tid}) ...")
+        try:
+            result = query_transcription(tid, timeout_s=120)
+            text = extract_text(result)
+            if not text:
+                print("  结果为空，跳过")
+                failed += 1
+                continue
+            for t in targets:
+                t.write_text(text, encoding="utf-8")
+            ok += 1
+            print(f"  ✓ 已补回（{len(text)} 字）")
+        except Exception as exc:
+            print(f"  ✗ 续取失败（很可能已超 24h 或任务不存在）：{exc}")
+            failed += 1
+    print(f"\n续取完成：成功补回 {ok} 个，已存在跳过 {skipped} 个，失败 {failed} 个。")
+    return 0
+
+
 # ---------- 辅助 ----------
 def list_audio_files(directory: Path, exts: set) -> list[Path]:
     return sorted(
@@ -247,7 +308,8 @@ def list_audio_files(directory: Path, exts: set) -> list[Path]:
     )
 
 
-def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: str) -> None:
+def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: str,
+                  index_cb=None) -> None:
     # 根据输出格式决定生成哪些文件
     targets: list[Path] = []
     if fmt in ("doc", "both"):
@@ -265,6 +327,10 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
     print("  已上传到百炼，开始转写...")
 
     task_id = submit_transcription(url, lang=lang)
+    # 立即记录 task_id ↔ 文件名 映射，方便额度中途耗尽/结果未落盘时，
+    # 在阿里云 24 小时留存窗口内用 --recover 把已转写的文稿重新拉回来
+    if index_cb:
+        index_cb(audio, task_id)
     result = query_transcription(task_id)
 
     text = extract_text(result)
@@ -312,15 +378,16 @@ def main() -> int:
         default=None,
         help="输出格式：doc(默认,与本地已有.doc统一) / md / both；也可用环境变量 OUTPUT_FORMAT",
     )
+    parser.add_argument(
+        "--recover", action="store_true",
+        help="续取模式：读取 task_index.csv，把『已提交转写但没生成文稿』的任务在 24h 内存活窗口内重新拉回结果",
+    )
     args = parser.parse_args()
 
     # 输出格式：命令行 > 环境变量 OUTPUT_FORMAT > 默认 doc
     fmt = (args.format or os.environ.get("OUTPUT_FORMAT", "doc")).lower()
     if fmt not in ("md", "doc", "both"):
         fmt = "doc"
-
-    if not args.dir and not args.file:
-        parser.error("必须提供至少一个 --dir 或 --file")
 
     # 解析输出目录：命令行 > 环境变量 > 音频同目录
     out_dir = None
@@ -332,6 +399,15 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"输出目录：{out_dir}")
 
+    # 续取模式：读取 task_index.csv，把已转写但没落盘的任务在 24h 窗口内拉回
+    if args.recover:
+        base = out_dir if out_dir else Path.cwd()
+        index_path = str(base / "task_index.csv")
+        return recover_from_index(index_path, out_dir if out_dir else Path.cwd(), fmt)
+
+    if not args.dir and not args.file:
+        parser.error("必须提供至少一个 --dir 或 --file")
+
     # 进度日志：每处理一个文件就追加一行，方便额度耗尽后知道转到了哪、下次从哪续
     log_path = os.environ.get("PROGRESS_LOG")
     if not log_path:
@@ -339,6 +415,14 @@ def main() -> int:
         log_path = str(base / "transcribe_progress.log")
     log_f = open(log_path, "a", encoding="utf-8")
     print(f"进度日志：{log_path}")
+
+    # task_id 索引：文件名 ↔ task_id，用于额度耗尽后 24h 内存活窗口内续取结果
+    index_path = str(Path(log_path).parent / "task_index.csv")
+    index_f = open(index_path, "a", newline="", encoding="utf-8")
+    index_writer = csv.writer(index_f)
+    if os.path.getsize(index_path) == 0:
+        index_writer.writerow(["filename", "task_id", "submit_time", "audio_path"])
+    print(f"task_id 索引：{index_path}")
 
     def log_line(status: str, audio: Path, note: str = "") -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -376,7 +460,7 @@ def main() -> int:
     for idx, audio in enumerate(files, 1):
         od = out_dir if out_dir else audio.parent
         try:
-            transcribe_one(audio, args.lang, args.overwrite, od, fmt)
+            transcribe_one(audio, args.lang, args.overwrite, od, fmt, index_cb=index_cb)
             ok += 1
             log_line("OK", audio)
         except Exception as exc:
@@ -399,6 +483,8 @@ def main() -> int:
 
     if log_f:
         log_f.close()
+    if index_f:
+        index_f.close()
 
     if stopped_for_quota:
         # 返回码 2 表示“额度耗尽主动停止”，便于外层脚本判断

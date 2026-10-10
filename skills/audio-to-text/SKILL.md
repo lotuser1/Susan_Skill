@@ -115,6 +115,7 @@ python3 scripts/transcribe.py --file /path/to/single.mp3
 | `--ext` | 指定扩展名，逗号分隔 | 常见音频格式 |
 | `--lang` | 语言：auto(自动)/cn/en/yue/fspk | auto |
 | `--overwrite` | 覆盖已存在的文字稿 | 关闭（跳过） |
+| `--recover` | 续取模式：把 `task_index.csv` 里已转写但没落盘的任务在 24h 内拉回 | 关闭 |
 
 ## 批量配置（推荐给非技术用户）
 
@@ -161,6 +162,26 @@ python3 scripts/transcribe.py --file /path/to/single.mp3
    python3 -m pip install requests
    ```
 5. 运行：在本目录执行 `bash run.sh`。
+
+## 找回未落盘的文稿（阿里云仅保留 24 小时）
+
+阿里云百炼转写完成后，结果 JSON 只通过一个 **`transcription_url` 临时下载链接** 提供，**有效期 24 小时**，超时后任务连同结果一并清除；且阿里云**没有"列出我所有任务"的入口**——必须靠本 Skill 自己留下的 `task_id` 才能回去找。
+
+为此，本 Skill 会在输出目录自动生成 `task_index.csv`（字段：文件名、task_id、提交时间、音频路径），记录每个文件的转写任务 ID。
+
+- **正常情况**：转写成功会立刻落盘，无需关心。
+- **额度中途耗尽 / 网络抖动导致"转写成功却没存下"**：只要还在 **提交后 24 小时内**，用续取模式把已转写但没落盘的文稿拉回来（不重复花钱）：
+
+  ```bash
+  # 在 config.env 已配置 OUTPUT_DIR 的前提下
+  python3 scripts/transcribe.py --recover
+  # 或经 run.sh：
+  bash run.sh --recover
+  ```
+
+  `--recover` 读取 `task_index.csv`，对"本地还没生成文稿"的任务重新 `GET /api/v1/tasks/{task_id}` 换链接并下载；已存在的自动跳过；超 24h 或任务不存在的会报失败（此时只能重新转写）。
+
+> 重要：一旦超过 24 小时，`task_id` 失效、结果不可恢复，只能重新提交转写（重新计费）。因此额度不足时建议尽快充值，并立刻跑一次 `--recover`。
 
 ## 关键行为与边界
 
