@@ -14,6 +14,8 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
 关键特性：
 - 批量：遍历目录下所有支持的音频文件
 - 断点续传：已存在同名文字稿的音频自动跳过，下次继续跑不重复花钱
+- 转写清单 transcribe_manifest.csv：每个文件标为 已转写(DONE)/未转写(PENDING)/失败(FAILED)，
+  无论因何停止（额度耗尽/保存失败/手动中断/崩溃）都能清楚看到哪些已转、哪些没转，下次重跑即续
 - 不依赖对象存储 OSS：音频直接上传到百炼自有文件服务，用户无需开通/配置 OSS
 - 输出格式可配置：--format 或环境变量 OUTPUT_FORMAT，支持 doc(默认)/md/both
 - 输出路径可配置：--output-dir 或环境变量 OUTPUT_DIR；不配置则存到音频同目录
@@ -360,6 +362,107 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
     print(f"  ✓ 已生成 {names}（{len(text)} 字）→ {out_dir}")
 
 
+# ---------- 转写清单（manifest）：记录每个文件「已转写 / 未转写」，方便下次续跑 ----------
+MANIFEST_COLS = ["audio_path", "status", "output_doc", "task_id", "updated_at", "note"]
+
+
+def compute_targets(audio: Path, out_dir: Path, fmt: str) -> list[Path]:
+    """根据输出格式计算该音频应生成的文字稿路径列表。"""
+    targets = []
+    if fmt in ("doc", "both"):
+        targets.append(out_dir / (audio.stem + ".doc"))
+    if fmt in ("md", "both"):
+        targets.append(out_dir / (audio.stem + ".md"))
+    return targets
+
+
+def build_manifest(files: list[Path], out_dir: Path, fmt: str, manifest_path: Path) -> dict:
+    """构建/合并转写清单。
+
+    - 若本地已存在对应文字稿，直接标记为 DONE（续跑时不重复花钱）；
+    - 否则标记为 PENDING；
+    - 若已有旧清单，沿用其中的 task_id（便于 --recover 续取）。
+    返回的 dict 以「音频绝对路径」为键，值是各列组成的 dict。
+    """
+    prev = {}
+    if manifest_path.exists():
+        with open(manifest_path, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                prev[r.get("audio_path", "")] = r
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    m = {}
+    for audio in files:
+        od = out_dir if out_dir else audio.parent
+        targets = compute_targets(audio, od, fmt)
+        key = str(audio)
+        done = bool(targets) and all(t.exists() for t in targets)
+        old = prev.get(key, {}) or {}
+        if done:
+            m[key] = {
+                "audio_path": key,
+                "status": "DONE",
+                "output_doc": ";".join(str(t) for t in targets),
+                "task_id": old.get("task_id", "") or "",
+                "updated_at": old.get("updated_at", "") or now,
+                "note": old.get("note", "") or "已存在文稿",
+            }
+        else:
+            # 旧清单即便标过 DONE，只要文稿丢失就重置为 PENDING，下次重新转写
+            m[key] = {
+                "audio_path": key,
+                "status": "PENDING",
+                "output_doc": ";".join(str(t) for t in targets),
+                "task_id": old.get("task_id", "") or "",
+                "updated_at": old.get("updated_at", "") or "",
+                "note": old.get("note", "") or "",
+            }
+    return m
+
+
+def save_manifest(manifest_path: Path, manifest: dict) -> None:
+    """原子写入清单：先写临时文件再 rename，避免写到一半程序崩溃导致清单损坏。"""
+    tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=MANIFEST_COLS)
+        w.writeheader()
+        for row in manifest.values():
+            w.writerow(row)
+    os.replace(tmp, manifest_path)
+
+
+def print_manifest_status(manifest_path: Path) -> int:
+    """打印清单统计：已转写 / 未转写 / 失败 各多少，并列出未完成的文件。"""
+    if not manifest_path.exists():
+        print(f"未找到清单 {manifest_path}，请先运行一次转写（会自动生成该文件）。")
+        return 1
+    done = pending = failed = 0
+    pending_files, failed_files = [], []
+    with open(manifest_path, newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            st = r.get("status", "")
+            if st == "DONE":
+                done += 1
+            elif st == "FAILED":
+                failed += 1
+                failed_files.append(r.get("audio_path", ""))
+            else:
+                pending += 1
+                pending_files.append(r.get("audio_path", ""))
+    print(f"转写清单（{manifest_path}）：")
+    print(f"  已转写完成：{done} 个")
+    print(f"  未转写    ：{pending} 个")
+    print(f"  失败      ：{failed} 个")
+    if pending_files:
+        print(f"\n未转写文件清单（共 {len(pending_files)} 个）：")
+        for p in pending_files:
+            print(f"  - {p}")
+    if failed_files:
+        print(f"\n失败文件清单（共 {len(failed_files)} 个，可 --overwrite 重试）：")
+        for p in failed_files:
+            print(f"  - {p}")
+    return 0
+
+
 # ---------- 主流程 ----------
 def main() -> int:
     parser = argparse.ArgumentParser(description="批量转写本地音频为文字稿（无需 OSS）")
@@ -399,6 +502,10 @@ def main() -> int:
         "--recover", action="store_true",
         help="续取模式：读取 task_index.csv，把『已提交转写但没生成文稿』的任务在 24h 内存活窗口内重新拉回结果",
     )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="仅打印转写清单（已转写/未转写/失败统计），不执行转写",
+    )
     args = parser.parse_args()
 
     # 输出格式：命令行 > 环境变量 OUTPUT_FORMAT > 默认 doc
@@ -415,6 +522,11 @@ def main() -> int:
     if out_dir:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"输出目录：{out_dir}")
+
+    # 仅查看清单模式：不执行转写
+    if args.status:
+        base = out_dir if out_dir else Path.cwd()
+        return print_manifest_status(base / "transcribe_manifest.csv")
 
     # 续取模式：读取 task_index.csv，把已转写但没落盘的任务在 24h 窗口内拉回
     if args.recover:
@@ -445,6 +557,10 @@ def main() -> int:
         # 提交成功即刻写入 文件名↔task_id，便于额度耗尽后在 24h 窗口内用 --recover 续取
         index_writer.writerow([audio.name, task_id, time.strftime("%Y-%m-%d %H:%M:%S"), str(audio)])
         index_f.flush()
+        # 同步记到转写清单，方便 --recover / 排查
+        row = manifest.get(str(audio))
+        if row is not None:
+            row["task_id"] = task_id
 
     def log_line(status: str, audio: Path, note: str = "") -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -465,9 +581,20 @@ def main() -> int:
 
     if not files:
         print("没有找到匹配的音频文件。")
+        log_f.close()
+        index_f.close()
         return 0
 
     print(f"共 {len(files)} 个音频待处理。")
+
+    # 转写清单：记录每个文件「已转写(DONE)/未转写(PENDING)/失败(FAILED)」。
+    # 无论因何种原因停止（额度耗尽、保存失败、手动中断、意外崩溃），都能凭此清单
+    # 知道哪些已转写、哪些没转写，下次直接重跑即可无缝续跑（已 DONE 的会自动跳过）。
+    manifest_path = (out_dir if out_dir else files[0].parent) / "transcribe_manifest.csv"
+    manifest = build_manifest(files, out_dir, fmt, manifest_path)
+    save_manifest(manifest_path, manifest)  # 先落一份初始清单（全部 PENDING/DONE）
+    print(f"转写清单：{manifest_path}")
+
     ok, fail = 0, 0
     stopped = False
     # 每处理完一个文件后的间隔（秒），避免短时间大量请求触发百炼限流；可用环境变量 REQUEST_INTERVAL 调整
@@ -479,47 +606,80 @@ def main() -> int:
         "accountnotexist", "nocode", "forbidden", "arrearage", "overdue",
         "access denied", "throttling", "throttled",
     )
-    for idx, audio in enumerate(files, 1):
-        od = out_dir if out_dir else audio.parent
-        try:
-            transcribe_one(audio, args.lang, args.overwrite, od, fmt, index_cb=index_cb)
-            ok += 1
-            log_line("OK", audio)
-        except Exception as exc:
-            msg = str(exc)
-            log_line("FAIL", audio, msg[:240])
-            # 两类“硬停止”条件：
-            #  1) 额度/余额/限流（关键词命中）→ 账号层面无法继续
-            #  2) 转写已完成但文稿未保存成功（TranscribedButSaveFailed）
-            #     → 检索/保存环节系统性故障，继续提交只会空耗额度、甚至造成欠费
-            if isinstance(exc, TranscribedButSaveFailed) or any(
-                k in msg.lower() for k in QUOTA_KEYWORDS
-            ):
-                if isinstance(exc, TranscribedButSaveFailed):
-                    print(f"\n⚠️  检测到「转写已完成但文稿未保存成功」的系统性故障（{msg[:200]}）")
-                    print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
-                    print(f"    本次停止于文件：{audio.name}")
-                    print(f"    👉 阿里云侧转写其实已完成，问题在「取结果/存盘」。请先排查网络/限流/磁盘；")
-                    print(f"       账号恢复正常后，24h 内运行 `bash run.sh --recover` 可免费把已转写的文稿补回；")
-                    print(f"       重跑 `bash run.sh` 则已生成的 .doc 会自动跳过。")
-                else:
-                    print(f"\n⚠️  检测到额度/余额不足或账号未开通/限流（{msg[:200]}）")
-                    print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
-                    print(f"    本次停止于文件：{audio.name}")
-                    print(f"    👉 下次充值后，重新运行相同命令即可；已生成的 .doc 会自动跳过，")
-                    print(f"       脚本会从「{audio.name}」继续转写。")
-                stopped = True
-                break
-            print(f"  ✗ {audio.name} 失败：{exc}", file=sys.stderr)
-            fail += 1
-        # 限速间隔：跳过已处理/失败的文件，降低触发限流的概率
-        if idx < len(files):
-            time.sleep(REQUEST_INTERVAL)
 
-    if log_f:
-        log_f.close()
-    if index_f:
-        index_f.close()
+    try:
+        for idx, audio in enumerate(files, 1):
+            od = out_dir if out_dir else audio.parent
+            key = str(audio)
+            row = manifest.get(key)
+            # 已转写完成且文稿仍在 → 跳过，不重复花钱
+            if row is not None and row["status"] == "DONE":
+                if all(t.exists() for t in compute_targets(audio, od, fmt)):
+                    print(f"[跳过] {audio.name}（已转写完成）")
+                    continue
+                row["status"] = "PENDING"  # 文稿丢失，重置待处理
+            try:
+                transcribe_one(audio, args.lang, args.overwrite, od, fmt, index_cb=index_cb)
+                ok += 1
+                log_line("OK", audio)
+                if row is not None:
+                    row["status"] = "DONE"
+                    row["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    row["note"] = ""
+                    save_manifest(manifest_path, manifest)
+            except Exception as exc:
+                msg = str(exc)
+                log_line("FAIL", audio, msg[:240])
+                if row is not None:
+                    row["status"] = "FAILED"
+                    row["note"] = msg[:200]
+                # 两类“硬停止”条件：
+                #  1) 额度/余额/限流（关键词命中）→ 账号层面无法继续
+                #  2) 转写已完成但文稿未保存成功（TranscribedButSaveFailed）
+                #     → 检索/保存环节系统性故障，继续提交只会空耗额度、甚至造成欠费
+                if isinstance(exc, TranscribedButSaveFailed) or any(
+                    k in msg.lower() for k in QUOTA_KEYWORDS
+                ):
+                    if isinstance(exc, TranscribedButSaveFailed):
+                        print(f"\n⚠️  检测到「转写已完成但文稿未保存成功」的系统性故障（{msg[:200]}）")
+                        print(f"    已成功 {ok} 个，进度已写入清单：{manifest_path}")
+                        print(f"    本次停止于文件：{audio.name}")
+                        print(f"    👉 阿里云侧转写其实已完成，问题在「取结果/存盘」。请先排查网络/限流/磁盘；")
+                        print(f"       账号恢复正常后，24h 内运行 `bash run.sh --recover` 可免费把已转写的文稿补回；")
+                        print(f"       重跑 `bash run.sh` 则已生成的 .doc 会自动跳过。")
+                    else:
+                        print(f"\n⚠️  检测到额度/余额不足或账号未开通/限流（{msg[:200]}）")
+                        print(f"    已成功 {ok} 个，进度已写入清单：{manifest_path}")
+                        print(f"    本次停止于文件：{audio.name}")
+                        print(f"    👉 下次充值后，直接重跑相同命令即可；已生成的 .doc 会自动跳过，")
+                        print(f"       脚本会从「{audio.name}」继续转写。")
+                    if row is not None:
+                        save_manifest(manifest_path, manifest)
+                    stopped = True
+                    break
+                print(f"  ✗ {audio.name} 失败：{exc}", file=sys.stderr)
+                fail += 1
+                if row is not None:
+                    save_manifest(manifest_path, manifest)
+            # 限速间隔：跳过已处理/失败的文件，降低触发限流的概率
+            if idx < len(files):
+                time.sleep(REQUEST_INTERVAL)
+    finally:
+        # 兜底：无论正常结束、硬停止还是意外退出，都确保清单已落盘
+        try:
+            save_manifest(manifest_path, manifest)
+        except Exception:
+            pass
+        if log_f:
+            log_f.close()
+        if index_f:
+            index_f.close()
+
+    done_n = sum(1 for r in manifest.values() if r["status"] == "DONE")
+    pend_n = sum(1 for r in manifest.values() if r["status"] == "PENDING")
+    fail_n = sum(1 for r in manifest.values() if r["status"] == "FAILED")
+    print(f"\n清单 {manifest_path}：已转写 {done_n} / 未转写 {pend_n} / 失败 {fail_n}")
+    print(f"下次直接重跑相同命令即可续跑；或运行 `bash run.sh --status` 查看进度。")
 
     if stopped:
         # 返回码 2 表示“硬停止（额度耗尽 / 转写完成但保存失败）”，便于外层脚本判断
