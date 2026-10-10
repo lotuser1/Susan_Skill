@@ -76,6 +76,16 @@ MIME = {
 }
 
 
+class TranscribedButSaveFailed(RuntimeError):
+    """转写任务已在阿里云完成，但取回结果/落盘失败。
+
+    触发于：extract_text 解析失败（Expecting value）、结果为空、write_text 写盘失败。
+    语义：钱已花、阿里云已转完，但我们没把文稿拿到/存下。
+    这通常意味着检索/保存环节存在系统性问题（限流、网络、磁盘），
+    继续提交更多文件只会空耗额度 → 由 main 决定整批停止（防欠费）。
+    """
+
+
 def _auth_headers() -> dict:
     api_key = os.environ.get("DASHSCOPE_API_KEY")
     if not api_key:
@@ -333,12 +343,19 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
         index_cb(audio, task_id)
     result = query_transcription(task_id)
 
-    text = extract_text(result)
-    if not text:
-        raise RuntimeError(f"{audio.name} 转写结果为空")
-
-    for t in targets:
-        t.write_text(text, encoding="utf-8")
+    # 以下任何一步失败，都意味着“阿里云已转完、但结果没拿到/没存下”
+    # → 检索/保存环节有系统性问题，应整批停止，避免继续空耗额度（防欠费）
+    try:
+        text = extract_text(result)
+        if not text:
+            raise RuntimeError(f"{audio.name} 转写结果为空（任务成功但无文本）")
+        for t in targets:
+            t.write_text(text, encoding="utf-8")
+    except Exception as exc:
+        raise TranscribedButSaveFailed(
+            f"转写已完成但文稿未保存成功：{exc}"
+            f"（请排查网络/限流/磁盘；账号恢复后可用 --recover 在 24h 内免费补回）"
+        ) from exc
     names = "、".join(t.name for t in targets)
     print(f"  ✓ 已生成 {names}（{len(text)} 字）→ {out_dir}")
 
@@ -452,7 +469,7 @@ def main() -> int:
 
     print(f"共 {len(files)} 个音频待处理。")
     ok, fail = 0, 0
-    stopped_for_quota = False
+    stopped = False
     # 每处理完一个文件后的间隔（秒），避免短时间大量请求触发百炼限流；可用环境变量 REQUEST_INTERVAL 调整
     REQUEST_INTERVAL = float(os.environ.get("REQUEST_INTERVAL", "2"))
     # 额度/余额/账号未开通/限流相关的关键词：命中即判定为“充钱才能继续”，主动停止整批
@@ -471,14 +488,27 @@ def main() -> int:
         except Exception as exc:
             msg = str(exc)
             log_line("FAIL", audio, msg[:240])
-            # 判断是否为额度/余额耗尽/限流：是则停止整批，避免对剩下上千个文件逐个重试浪费时间
-            if any(k in msg.lower() for k in QUOTA_KEYWORDS):
-                print(f"\n⚠️  检测到额度/余额不足或账号未开通/限流（{msg[:200]}）")
-                print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
-                print(f"    本次停止于文件：{audio.name}")
-                print(f"    👉 下次充值后，重新运行相同命令即可；已生成的 .doc 会自动跳过，")
-                print(f"       脚本会从「{audio.name}」继续转写。")
-                stopped_for_quota = True
+            # 两类“硬停止”条件：
+            #  1) 额度/余额/限流（关键词命中）→ 账号层面无法继续
+            #  2) 转写已完成但文稿未保存成功（TranscribedButSaveFailed）
+            #     → 检索/保存环节系统性故障，继续提交只会空耗额度、甚至造成欠费
+            if isinstance(exc, TranscribedButSaveFailed) or any(
+                k in msg.lower() for k in QUOTA_KEYWORDS
+            ):
+                if isinstance(exc, TranscribedButSaveFailed):
+                    print(f"\n⚠️  检测到「转写已完成但文稿未保存成功」的系统性故障（{msg[:200]}）")
+                    print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
+                    print(f"    本次停止于文件：{audio.name}")
+                    print(f"    👉 阿里云侧转写其实已完成，问题在「取结果/存盘」。请先排查网络/限流/磁盘；")
+                    print(f"       账号恢复正常后，24h 内运行 `bash run.sh --recover` 可免费把已转写的文稿补回；")
+                    print(f"       重跑 `bash run.sh` 则已生成的 .doc 会自动跳过。")
+                else:
+                    print(f"\n⚠️  检测到额度/余额不足或账号未开通/限流（{msg[:200]}）")
+                    print(f"    已成功 {ok} 个，进度已写入日志：{log_path}")
+                    print(f"    本次停止于文件：{audio.name}")
+                    print(f"    👉 下次充值后，重新运行相同命令即可；已生成的 .doc 会自动跳过，")
+                    print(f"       脚本会从「{audio.name}」继续转写。")
+                stopped = True
                 break
             print(f"  ✗ {audio.name} 失败：{exc}", file=sys.stderr)
             fail += 1
@@ -491,8 +521,8 @@ def main() -> int:
     if index_f:
         index_f.close()
 
-    if stopped_for_quota:
-        # 返回码 2 表示“额度耗尽主动停止”，便于外层脚本判断
+    if stopped:
+        # 返回码 2 表示“硬停止（额度耗尽 / 转写完成但保存失败）”，便于外层脚本判断
         return 2
     print(f"\n完成：成功 {ok}，失败 {fail}。失败项可用 --overwrite 重试。")
     return 0 if fail == 0 else 1
