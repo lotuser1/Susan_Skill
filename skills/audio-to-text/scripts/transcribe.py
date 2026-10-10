@@ -23,7 +23,9 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
 - 续取能力：自动记录 文件名↔task_id，额度耗尽或结果未落盘时，可在阿里云 24 小时
   留存窗口内用 --recover 把已转写的文稿重新拉回（需仍在 24h 内）
 - 说话人分离：默认开启（SPEAKER_DIARIZATION），多人对话/访谈自动标注「说话人1/说话人2…」；
-  仅单声道音频有效，可在 config.env 设 SPEAKER_DIARIZATION=false 关闭；--overwrite 可强制重转已完成的文稿以统一格式
+  仅单声道音频有效，开启时脚本会自动把多声道音频下混为单声道，并改用支持分离的模型
+  （DIARIZATION_MODEL，默认 qwen-audio-3.1-asr-flash-filetrans；qwen3-asr-flash-filetrans 不支持分离）；
+  可在 config.env 设 SPEAKER_DIARIZATION=false 关闭；--overwrite 可强制重转已完成的文稿以统一格式
 
 所需环境变量：
   DASHSCOPE_API_KEY    阿里云百炼 API Key（必填）
@@ -64,7 +66,14 @@ SUPPORTED_EXT = {
 #   qwen3-asr-flash-filetrans  → 默认，最准确，国内约 0.00022 元/秒
 #   paraformer-v2              → 最便宜，国内约 0.00008 元/秒（医美方言语种略弱）
 #   paraformer-8k-v2           → 电话录音等 8k 采样场景
+# 注意：qwen3-asr-flash-filetrans 系列【不支持】说话人分离（speaker_id）；
+#       需要说话人分离时，应使用下方 DIARIZATION_MODEL（qwen-audio-3.x / fun-asr / paraformer 支持）。
 MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash-filetrans")
+
+# 说话人分离专用模型：qwen3-asr-flash-filetrans 不支持 speaker_id，
+# 而 qwen-audio-3.1-asr-flash-filetrans / qwen-audio-3.0-asr-flash-filetrans / fun-asr / paraformer
+# 支持 diarization_enabled + 返回每句 speaker_id。开启说话人分离时自动切换至此模型。
+DIARIZATION_MODEL = os.environ.get("DIARIZATION_MODEL", "qwen-audio-3.1-asr-flash-filetrans")
 
 # 说话人分离（speaker diarization）：开启后转写结果按说话人分段并标注“说话人1/2…”。
 # 默认开启；如不需要可在 config.env 设 SPEAKER_DIARIZATION=false。
@@ -73,8 +82,15 @@ DIARIZATION = os.environ.get("SPEAKER_DIARIZATION", "true").strip().lower() in (
     "1", "true", "yes", "on"
 )
 # 可选：提示说话人数量（2~100），不填则模型自动判断。在 config.env 设 SPEAKER_COUNT=N 生效。
+# 默认（开启说话人分离且未显式指定时）提示 2 人：用户场景多为访谈/对话，给数量提示能显著改善分离效果，
+# 避免模型把两人对话误判为单人、导致整篇都标成「说话人1」。
 _SPEAKER_COUNT = os.environ.get("SPEAKER_COUNT", "").strip()
-SPEAKER_COUNT = int(_SPEAKER_COUNT) if _SPEAKER_COUNT.isdigit() and 2 <= int(_SPEAKER_COUNT) <= 100 else None
+if _SPEAKER_COUNT.isdigit() and 2 <= int(_SPEAKER_COUNT) <= 100:
+    SPEAKER_COUNT = int(_SPEAKER_COUNT)
+elif DIARIZATION:
+    SPEAKER_COUNT = 2
+else:
+    SPEAKER_COUNT = None
 
 # 百炼 API 地址（默认国内站；国际站账号通过环境变量 DASHSCOPE_BASE_URL 切换）
 BASE_URL = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com").rstrip("/")
@@ -141,11 +157,15 @@ def upload_to_dashscope(local_path: Path) -> str:
 
 
 # ---------- 转写任务 ----------
-def submit_transcription(file_url: str, lang: str = "auto", diarization: bool = False) -> str:
+def submit_transcription(file_url: str, lang: str = "auto", diarization: bool = False,
+                         model: str | None = None) -> str:
     """提交异步转写任务，返回 task_id。
 
     diarization=True 时开启说话人分离（仅单声道有效），结果每句带 speaker_id。
+    模型选择：显式 model 优先；否则开启分离用 DIARIZATION_MODEL，否则用 MODEL。
+    （qwen3-asr-flash-filetrans 不支持分离，必须切到 qwen-audio-3.x/fun-asr/paraformer。）
     """
+    _model = model or (DIARIZATION_MODEL if diarization else MODEL)
     _auth_headers()  # 仅做密钥存在性检查
     headers = {
         **_auth_headers(),
@@ -164,7 +184,7 @@ def submit_transcription(file_url: str, lang: str = "auto", diarization: bool = 
         params["language"] = lang
 
     payload = {
-        "model": MODEL,
+        "model": _model,
         "input": {"file_url": file_url},
         "parameters": params,
     }
@@ -203,6 +223,64 @@ def query_transcription(task_id: str, timeout_s: int = 1800) -> dict:
             )
         time.sleep(5)
     raise TimeoutError(f"转写任务 {task_id} 超时（{timeout_s}s）")
+
+
+# ---------- 多声道 → 单声道下混（说话人分离的硬性前置条件） ----------
+def _ffmpeg_exe() -> str | None:
+    """定位 ffmpeg：优先 imageio-ffmpeg 自带的静态二进制，其次 PATH 上的 ffmpeg。找不到返回 None。"""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    import shutil
+    return shutil.which("ffmpeg")
+
+
+def _audio_channels(path: Path) -> int:
+    """用 mutagen 读取声道数；读不到保守返回 1（按单声道处理）。"""
+    try:
+        from mutagen.mp4 import MP4
+        return int(MP4(str(path)).info.channels)
+    except Exception:
+        return 1
+
+
+_MONO_TMP_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "audio_to_text_mono"
+
+
+def to_mono_if_needed(audio: Path, diarization: bool) -> tuple[Path, bool]:
+    """说话人分离仅支持单声道音频。若开启分离且音频为多声道，则下混为单声道临时文件后返回。
+
+    返回 (用于上传的路径, 是否为临时文件)。非分离或已是单声道直接返回原路径；
+    缺少 ffmpeg 或下混失败则回退原路径（并在 stderr 告警，避免静默产出错误结果）。
+    """
+    if not diarization:
+        return audio, False
+    try:
+        ch = _audio_channels(audio)
+    except Exception:
+        ch = 1
+    if ch <= 1:
+        return audio, False
+    ff = _ffmpeg_exe()
+    if not ff:
+        print("  ⚠️ 未找到 ffmpeg，无法将立体声下混为单声道；说话人分离可能因多声道而失效。",
+              file=sys.stderr)
+        return audio, False
+    _MONO_TMP_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _MONO_TMP_DIR / (audio.stem + "_mono.m4a")
+    try:
+        import subprocess
+        subprocess.run([ff, "-y", "-i", str(audio), "-ac", "1", "-ar", "16000", str(tmp)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+    except Exception as exc:
+        print(f"  ⚠️ 下混单声道失败（{exc}），将直接上传原始音频。", file=sys.stderr)
+        return audio, False
+    if tmp.exists() and tmp.stat().st_size > 0:
+        print(f"  （立体声已下混为单声道以启用说话人分离：{tmp.name}）")
+        return tmp, True
+    return audio, False
 
 
 # ---------- 结果转文字 ----------
@@ -265,19 +343,39 @@ def extract_text(result: dict, diarization: bool = False) -> str:
     {"transcripts": [{"channel_id":0, "text": "...", "sentences":[{"speaker_id":0,"text":"..."}]}, ...]}
 
     当 diarization=True 时，按每句话的 speaker_id 分段，拼接成
-    “【说话人1】...” 这样的带说话人标签文本；若结果里没有 speaker_id
-    （例如音频为多声道、或模型未返回），则回退到整段 text。
+    “【说话人1】...” 这样的带说话人标签文本；若结果里没真正区分出多人
+    （speaker_id 全为空或只有一个），说明说话人分离未生效，则回退整段文本并告警，
+    避免产出“整篇都是说话人1”的误导性文稿。
     """
+    out = result.get("output", {}) or {}
+    # 不同模型返回结构不同：
+    #   qwen3-asr-flash-filetrans         → output.result.transcription_url
+    #   qwen-audio-3.x-asr-flash-filetrans → output.transcription_url（也可在 output.results[0]）
     transcription_url = (
-        result.get("output", {}).get("result", {}).get("transcription_url")
+        (out.get("result") or {}).get("transcription_url")
+        or out.get("transcription_url")
+        or (((out.get("results") or []) or [{}])[0] or {}).get("transcription_url")
     )
     if not transcription_url:
         raise RuntimeError("结果中未找到 transcription_url")
     # 结果文件可能较大或受网络波动影响，带重试拉取，避免“转写成功却没存下”
     data = _get_json(transcription_url, timeout=60, stage="拉取转写结果")
 
+    # 调试开关：把原始结果落盘，便于排查说话人分离为何不生效
+    if os.environ.get("DUMP_RAW_JSON"):
+        try:
+            import json as _json
+            _dir = Path(os.environ.get("DUMP_RAW_JSON_DIR", "/tmp"))
+            _dir.mkdir(parents=True, exist_ok=True)
+            (_dir / "last_transcription_raw.json").write_text(
+                _json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
     if diarization:
         blocks = []  # [(speaker_id, [text_segments])]
+        distinct_sids = set()
         for tr in data.get("transcripts", []) or []:
             sentences = tr.get("sentences") or []
             if not sentences:
@@ -293,6 +391,8 @@ def extract_text(result: dict, diarization: bool = False) -> str:
                 stext = (s.get("text") or "").strip()
                 if not stext:
                     continue
+                if sid is not None:
+                    distinct_sids.add(sid)
                 if sid != cur:
                     if buf:
                         blocks.append((cur, buf))
@@ -302,6 +402,19 @@ def extract_text(result: dict, diarization: bool = False) -> str:
                     buf.append(stext)
             if buf:
                 blocks.append((cur, buf))
+        # 说话人分离未真正生效（只识别到 0/1 个说话人）→ 不误导，回退整段文本并告警
+        if len(distinct_sids) <= 1:
+            print(
+                "  ⚠️ 说话人分离未生效：结果未返回有效 speaker_id（仅识别出 1 个说话人）。"
+                "已按整段文本输出，未强行标注「说话人1」。",
+                file=sys.stderr,
+            )
+            parts = []
+            for tr in data.get("transcripts", []) or []:
+                txt = tr.get("text")
+                if txt:
+                    parts.append(txt.strip())
+            return "\n\n".join(parts).strip()
         if blocks:
             lines = []
             for sid, buf in blocks:
@@ -525,10 +638,21 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
         return
 
     print(f"[处理] {audio.name} ...")
-    url = upload_to_dashscope(audio)
+    # 说话人分离仅支持单声道：多声道音频先下混为单声道再上传（命名仍用原始文件名）
+    upload_path, is_tmp = to_mono_if_needed(audio, diarization)
+    try:
+        url = upload_to_dashscope(upload_path)
+    finally:
+        if is_tmp:
+            try:
+                upload_path.unlink()
+            except Exception:
+                pass
     print("  已上传到百炼，开始转写...")
 
-    task_id = submit_transcription(url, lang=lang, diarization=diarization)
+    # 开启分离时切换至支持 speaker_id 的模型（qwen3 系列不支持分离）
+    model = DIARIZATION_MODEL if diarization else MODEL
+    task_id = submit_transcription(url, lang=lang, diarization=diarization, model=model)
     # 立即记录 task_id ↔ 文件名 映射，方便额度中途耗尽/结果未落盘时，
     # 在阿里云 24 小时留存窗口内用 --recover 把已转写的文稿重新拉回来
     if index_cb:
