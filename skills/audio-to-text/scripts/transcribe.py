@@ -424,6 +424,11 @@ def main() -> int:
         index_writer.writerow(["filename", "task_id", "submit_time", "audio_path"])
     print(f"task_id 索引：{index_path}")
 
+    def index_cb(audio: Path, task_id: str) -> None:
+        # 提交成功即刻写入 文件名↔task_id，便于额度耗尽后在 24h 窗口内用 --recover 续取
+        index_writer.writerow([audio.name, task_id, time.strftime("%Y-%m-%d %H:%M:%S"), str(audio)])
+        index_f.flush()
+
     def log_line(status: str, audio: Path, note: str = "") -> None:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         log_f.write(f"{ts}\t{status}\t{audio}\t{note}\n")
