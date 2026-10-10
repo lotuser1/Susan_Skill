@@ -44,6 +44,7 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
 
 import argparse
 import csv
+import json
 import os
 import sys
 import time
@@ -313,6 +314,116 @@ def recover_from_index(index_path: str, out_dir: Path, fmt: str) -> int:
     return 0
 
 
+# ---------- 批量找回：列出租户下最近 24h 内已成功的任务，逐个下载转写结果 ----------
+def recover_bulk(base_url: str, api_key: str, model: str, out_dir: Path,
+                window_start: str = "", window_end: str = "",
+                status: str = "SUCCEEDED", page_size: int = 100) -> int:
+    """批量找回历史任务结果（无需事先记录 task_id）。
+
+    利用百炼「管理异步任务」的批量查询接口 GET /api/v1/tasks（不带 task_id 即返回
+    该账号最近 24 小时内提交的所有任务），逐个取出 transcription_url 并下载结果 JSON。
+
+    适用场景：
+      - 之前批量转写成功、但因脚本未记录 task_id / 未落盘而“丢失”的文稿；
+      - 任何一次“转写已完成但没存下”的意外。
+
+    重要限制（平台侧）：
+      - 任务结果仅保留 24 小时，超期后无法查询/下载；
+      - 返回的结果文件名是 task_id(uuid)，**不含原始录音名**，找回的文稿无法直接
+        对应回原录音（除非你按文稿内容手动辨认）。
+    因此本功能主要用于“抢救已付费但没存下的文本”，而非替代规范的续跑/清单机制。
+    """
+    if not api_key:
+        print("缺少 DASHSCOPE_API_KEY，无法找回。", file=sys.stderr)
+        return 1
+    headers = {"Authorization": f"Bearer {api_key}"}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"批量找回 → 输出目录：{out_dir}")
+    print(f"查询条件：model={model}, status={status}"
+          + (f", 时间窗 {window_start}~{window_end}" if window_start or window_end else "（默认最近 24h）"))
+
+    # 1) 分页列出所有符合条件的 task_id
+    task_ids: list[str] = []
+    page = 1
+    while True:
+        params = {"status": status, "model_name": model,
+                  "page_size": page_size, "page_no": page}
+        if window_start:
+            params["start_time"] = window_start
+        if window_end:
+            params["end_time"] = window_end
+        try:
+            r = requests.get(f"{base_url}/api/v1/tasks", headers=headers,
+                             params=params, timeout=30)
+        except Exception as exc:
+            print(f"  列表请求失败：{exc}")
+            break
+        if r.status_code != 200:
+            print(f"  列表页 {page} HTTP {r.status_code}：{r.text[:200]}")
+            break
+        data = r.json()
+        for row in data.get("data", []) or []:
+            if row.get("status") == status and row.get("task_id"):
+                task_ids.append(row["task_id"])
+        total_page = data.get("total_page", 1) or 1
+        if page >= total_page or not data.get("data"):
+            break
+        page += 1
+        time.sleep(0.1)
+
+    if not task_ids:
+        print("没有找到可找回的任务（可能已超 24h，或该时间窗内无成功任务）。")
+        return 0
+    print(f"共找到 {len(task_ids)} 个 {status} 任务，开始下载结果...")
+
+    # 2) 逐个取详情 → 下载 transcription_url → 存 JSON + 提取纯文本
+    ok = fail = 0
+    for i, tid in enumerate(task_ids, 1):
+        try:
+            d = requests.get(f"{base_url}/api/v1/tasks/{tid}", headers=headers,
+                             timeout=30).json()
+            out = (d.get("output") or {})
+            urls = []
+            res = out.get("result") or {}
+            if res.get("transcription_url"):
+                urls = [res["transcription_url"]]
+            else:
+                for rr in (out.get("results") or []):
+                    if rr.get("transcription_url"):
+                        urls.append(rr["transcription_url"])
+            if not urls:
+                print(f"  [{i}/{len(task_ids)}] {tid} 无 transcription_url，跳过")
+                fail += 1
+                continue
+            content = requests.get(urls[0], timeout=60).content
+            (out_dir / f"{tid}.json").write_bytes(content)
+            # 尝试从 JSON 抽取纯文本，方便直接阅读/搜索
+            try:
+                j = json.loads(content)
+                parts = []
+                for tr in (j.get("transcripts") or []):
+                    if isinstance(tr, dict) and tr.get("text"):
+                        parts.append(tr["text"].strip())
+                text = "\n\n".join(p for p in parts if p)
+                if text:
+                    (out_dir / f"{tid}.txt").write_text(text, encoding="utf-8")
+            except Exception:
+                pass
+            ok += 1
+            if i % 50 == 0:
+                print(f"  已下载 {i}/{len(task_ids)}")
+        except Exception as exc:
+            print(f"  [{i}/{len(task_ids)}] {tid} 失败：{exc}", file=sys.stderr)
+            fail += 1
+        time.sleep(0.1)
+
+    print(f"\n批量找回完成：成功 {ok} 个，失败 {fail} 个。")
+    print(f"文件保存在：{out_dir}")
+    print("⚠️ 找回的文件以 task_id(uuid) 命名，不含原始录音名，无法直接对应回原录音；"
+          "可按文稿内容手动辨认，或用于内容检索。")
+    return 0
+
+
 # ---------- 辅助 ----------
 def list_audio_files(directory: Path, exts: set) -> list[Path]:
     return sorted(
@@ -503,6 +614,12 @@ def main() -> int:
         help="续取模式：读取 task_index.csv，把『已提交转写但没生成文稿』的任务在 24h 内存活窗口内重新拉回结果",
     )
     parser.add_argument(
+        "--recover-bulk", action="store_true",
+        help="批量找回：列出账号最近 24h 内已成功的任务(无需事先记录task_id)，逐个下载转写结果JSON+文本（按时间窗筛选，结果以uuid命名）",
+    )
+    parser.add_argument("--start-time", default="", help="批量找回时间窗起点 YYYYMMDDhhmmss（默认最近24h）")
+    parser.add_argument("--end-time", default="", help="批量找回时间窗终点 YYYYMMDDhhmmss")
+    parser.add_argument(
         "--status", action="store_true",
         help="仅打印转写清单（已转写/未转写/失败统计），不执行转写",
     )
@@ -533,6 +650,16 @@ def main() -> int:
         base = out_dir if out_dir else Path.cwd()
         index_path = str(base / "task_index.csv")
         return recover_from_index(index_path, out_dir if out_dir else Path.cwd(), fmt)
+
+    # 批量找回模式：列出账号最近 24h 内已成功任务，逐个下载结果（无需事先记录 task_id）
+    if args.recover_bulk:
+        base = out_dir if out_dir else Path.cwd()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        folder = base / f"recovered_bulk_{ts}"
+        return recover_bulk(
+            BASE_URL, os.environ.get("DASHSCOPE_API_KEY", ""), MODEL, folder,
+            window_start=args.start_time, window_end=args.end_time,
+        )
 
     if not args.dir and not args.file:
         parser.error("必须提供至少一个 --dir 或 --file")
