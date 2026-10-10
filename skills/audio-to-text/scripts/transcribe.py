@@ -476,18 +476,34 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
         index_cb(audio, task_id)
     result = query_transcription(task_id)
 
-    # 以下任何一步失败，都意味着“阿里云已转完、但结果没拿到/没存下”
-    # → 检索/保存环节有系统性问题，应整批停止，避免继续空耗额度（防欠费）
+    # 1) 拉取/解析结果：这一步失败 = “阿里云已转完、但结果没取到”
+    #    → 检索环节的系统性故障，应整批停止，避免继续空耗额度（防欠费）
     try:
         text = extract_text(result)
-        if not text:
-            raise RuntimeError(f"{audio.name} 转写结果为空（任务成功但无文本）")
+    except Exception as exc:
+        raise TranscribedButSaveFailed(
+            f"转写已完成但结果未取到：{exc}"
+            f"（请排查网络/限流；账号恢复后可用 --recover 在 24h 内免费补回）"
+        ) from exc
+
+    # 2) 转写成功但无有效语音（空文本）：单文件正常情况（静音/非语音录音），
+    #    写占位文稿并跳过，不中断整批，也不重复花钱
+    if not text:
+        for t in targets:
+            t.write_text(
+                "（该录音经阿里云转写无有效语音内容，已标记为跳过）", encoding="utf-8"
+            )
+        print(f"  ⊘ {audio.name} 转写无有效语音，已写占位跳过")
+        return
+
+    # 3) 结果已取到，写入文稿：这一步失败 = “取到但没存下”，同样整批停止
+    try:
         for t in targets:
             t.write_text(text, encoding="utf-8")
     except Exception as exc:
         raise TranscribedButSaveFailed(
             f"转写已完成但文稿未保存成功：{exc}"
-            f"（请排查网络/限流/磁盘；账号恢复后可用 --recover 在 24h 内免费补回）"
+            f"（请排查磁盘/权限；账号恢复后可用 --recover 在 24h 内免费补回）"
         ) from exc
     names = "、".join(t.name for t in targets)
     print(f"  ✓ 已生成 {names}（{len(text)} 字）→ {out_dir}")
