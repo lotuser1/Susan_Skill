@@ -22,6 +22,8 @@ audio-to-text 核心脚本（无 OSS 版 · 国际站/国内站通用）
 - 站点可配置：国内站默认；国际站账号填 DASHSCOPE_BASE_URL 即可
 - 续取能力：自动记录 文件名↔task_id，额度耗尽或结果未落盘时，可在阿里云 24 小时
   留存窗口内用 --recover 把已转写的文稿重新拉回（需仍在 24h 内）
+- 说话人分离：默认开启（SPEAKER_DIARIZATION），多人对话/访谈自动标注「说话人1/说话人2…」；
+  仅单声道音频有效，可在 config.env 设 SPEAKER_DIARIZATION=false 关闭；--overwrite 可强制重转已完成的文稿以统一格式
 
 所需环境变量：
   DASHSCOPE_API_KEY    阿里云百炼 API Key（必填）
@@ -63,6 +65,16 @@ SUPPORTED_EXT = {
 #   paraformer-v2              → 最便宜，国内约 0.00008 元/秒（医美方言语种略弱）
 #   paraformer-8k-v2           → 电话录音等 8k 采样场景
 MODEL = os.environ.get("ASR_MODEL", "qwen3-asr-flash-filetrans")
+
+# 说话人分离（speaker diarization）：开启后转写结果按说话人分段并标注“说话人1/2…”。
+# 默认开启；如不需要可在 config.env 设 SPEAKER_DIARIZATION=false。
+# 注意：仅单声道音频有效；开启后单条音频建议 ≤ 2 小时，否则可能失败/超时。
+DIARIZATION = os.environ.get("SPEAKER_DIARIZATION", "true").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+# 可选：提示说话人数量（2~100），不填则模型自动判断。在 config.env 设 SPEAKER_COUNT=N 生效。
+_SPEAKER_COUNT = os.environ.get("SPEAKER_COUNT", "").strip()
+SPEAKER_COUNT = int(_SPEAKER_COUNT) if _SPEAKER_COUNT.isdigit() and 2 <= int(_SPEAKER_COUNT) <= 100 else None
 
 # 百炼 API 地址（默认国内站；国际站账号通过环境变量 DASHSCOPE_BASE_URL 切换）
 BASE_URL = os.environ.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com").rstrip("/")
@@ -129,8 +141,11 @@ def upload_to_dashscope(local_path: Path) -> str:
 
 
 # ---------- 转写任务 ----------
-def submit_transcription(file_url: str, lang: str = "auto") -> str:
-    """提交异步转写任务，返回 task_id。"""
+def submit_transcription(file_url: str, lang: str = "auto", diarization: bool = False) -> str:
+    """提交异步转写任务，返回 task_id。
+
+    diarization=True 时开启说话人分离（仅单声道有效），结果每句带 speaker_id。
+    """
     _auth_headers()  # 仅做密钥存在性检查
     headers = {
         **_auth_headers(),
@@ -139,6 +154,11 @@ def submit_transcription(file_url: str, lang: str = "auto") -> str:
     }
     # channel_id=[0] 识别第 1 条音轨；enable_itn=False 保留原始读法
     params = {"channel_id": [0], "enable_itn": False}
+    if diarization:
+        # 开启说话人分离：结果里每句话会带 speaker_id，用于区分不同说话人
+        params["diarization_enabled"] = True
+        if SPEAKER_COUNT is not None:
+            params["speaker_count"] = SPEAKER_COUNT
     # auto/cn/zh 走自动识别，避免误伤；其余语种显式指定
     if lang and lang not in ("auto", "cn", "zh"):
         params["language"] = lang
@@ -238,11 +258,15 @@ def _post_json(url: str, headers=None, files=None, data=None, json=None,
     raise RuntimeError(f"{stage} 失败（已重试 {tries} 次）：{last_err}")
 
 
-def extract_text(result: dict) -> str:
+def extract_text(result: dict, diarization: bool = False) -> str:
     """从转写结果中提取正文文本。
 
     真实结构：result.output.result.transcription_url → 该 URL 指向的 JSON 含
-    {"transcripts": [{"channel_id":0, "text": "..."}, ...]}
+    {"transcripts": [{"channel_id":0, "text": "...", "sentences":[{"speaker_id":0,"text":"..."}]}, ...]}
+
+    当 diarization=True 时，按每句话的 speaker_id 分段，拼接成
+    “【说话人1】...” 这样的带说话人标签文本；若结果里没有 speaker_id
+    （例如音频为多声道、或模型未返回），则回退到整段 text。
     """
     transcription_url = (
         result.get("output", {}).get("result", {}).get("transcription_url")
@@ -251,6 +275,41 @@ def extract_text(result: dict) -> str:
         raise RuntimeError("结果中未找到 transcription_url")
     # 结果文件可能较大或受网络波动影响，带重试拉取，避免“转写成功却没存下”
     data = _get_json(transcription_url, timeout=60, stage="拉取转写结果")
+
+    if diarization:
+        blocks = []  # [(speaker_id, [text_segments])]
+        for tr in data.get("transcripts", []) or []:
+            sentences = tr.get("sentences") or []
+            if not sentences:
+                # 没有句子级信息，退回段落级
+                txt = (tr.get("text") or "").strip()
+                if txt:
+                    blocks.append((None, [txt]))
+                continue
+            cur = None
+            buf = []
+            for s in sentences:
+                sid = s.get("speaker_id")
+                stext = (s.get("text") or "").strip()
+                if not stext:
+                    continue
+                if sid != cur:
+                    if buf:
+                        blocks.append((cur, buf))
+                    cur = sid
+                    buf = [stext]
+                else:
+                    buf.append(stext)
+            if buf:
+                blocks.append((cur, buf))
+        if blocks:
+            lines = []
+            for sid, buf in blocks:
+                label = f"说话人{(sid or 0) + 1}"
+                lines.append(f"【{label}】" + "".join(buf))
+            return "\n\n".join(lines).strip()
+
+    # 未开启说话人分离，或结果无 speaker_id：沿用整段 text
     parts = []
     for tr in data.get("transcripts", []) or []:
         txt = tr.get("text")
@@ -298,7 +357,7 @@ def recover_from_index(index_path: str, out_dir: Path, fmt: str) -> int:
         print(f"[续取] {fname} (task_id={tid}) ...")
         try:
             result = query_transcription(tid, timeout_s=120)
-            text = extract_text(result)
+            text = extract_text(result, diarization=DIARIZATION)
             if not text:
                 print("  结果为空，跳过")
                 failed += 1
@@ -452,7 +511,7 @@ def list_audio_files(directory: Path, exts: set) -> list[Path]:
 
 
 def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: str,
-                  index_cb=None) -> None:
+                  index_cb=None, diarization: bool = False) -> None:
     # 根据输出格式决定生成哪些文件
     targets: list[Path] = []
     if fmt in ("doc", "both"):
@@ -469,7 +528,7 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
     url = upload_to_dashscope(audio)
     print("  已上传到百炼，开始转写...")
 
-    task_id = submit_transcription(url, lang=lang)
+    task_id = submit_transcription(url, lang=lang, diarization=diarization)
     # 立即记录 task_id ↔ 文件名 映射，方便额度中途耗尽/结果未落盘时，
     # 在阿里云 24 小时留存窗口内用 --recover 把已转写的文稿重新拉回来
     if index_cb:
@@ -479,7 +538,7 @@ def transcribe_one(audio: Path, lang: str, overwrite: bool, out_dir: Path, fmt: 
     # 1) 拉取/解析结果：这一步失败 = “阿里云已转完、但结果没取到”
     #    → 检索环节的系统性故障，应整批停止，避免继续空耗额度（防欠费）
     try:
-        text = extract_text(result)
+        text = extract_text(result, diarization=diarization)
     except Exception as exc:
         raise TranscribedButSaveFailed(
             f"转写已完成但结果未取到：{exc}"
@@ -567,14 +626,16 @@ def build_manifest(files: list[Path], out_dir: Path, fmt: str, manifest_path: Pa
 
 
 def save_manifest(manifest_path: Path, manifest: dict) -> None:
-    """原子写入清单：先写临时文件再 rename，避免写到一半程序崩溃导致清单损坏。"""
-    tmp = manifest_path.with_name(manifest_path.name + ".tmp")
-    with open(tmp, "w", newline="", encoding="utf-8") as f:
+    """写入清单（直接写回，避免 os.replace/rename 的 unlink 触发沙箱拦截）。
+
+    注：此前用「临时文件 + os.replace」做原子写入，但在 macOS 上 os.replace
+    会先 unlink 旧文件，被沙箱拦截。改为直接 open("w") 原地截断写回，同样安全。
+    """
+    with open(manifest_path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=MANIFEST_COLS)
         w.writeheader()
         for row in manifest.values():
             w.writerow(row)
-    os.replace(tmp, manifest_path)
 
 
 def print_manifest_status(manifest_path: Path) -> int:
@@ -623,6 +684,10 @@ def main() -> int:
     parser.add_argument(
         "--file", action="append", type=Path,
         help="单个音频文件；可多次使用以批量指定多个文件（也可用 --dir 指定整个文件夹）"
+    )
+    parser.add_argument(
+        "--diarization", action="store_true",
+        help="强制开启说话人分离（即使 config.env 的 SPEAKER_DIARIZATION=false 也生效）",
     )
     parser.add_argument(
         "--output-dir",
@@ -752,6 +817,10 @@ def main() -> int:
         index_f.close()
         return 0
 
+    # 说话人分离开关：环境变量 SPEAKER_DIARIZATION（默认开）与 --diarization 命令行取并集（任一为真即开启）
+    diar = DIARIZATION or args.diarization
+    print(f"说话人分离：{'开启' if diar else '关闭'}")
+
     print(f"共 {len(files)} 个音频待处理。")
 
     # 转写清单：记录每个文件「已转写(DONE)/未转写(PENDING)/失败(FAILED)」。
@@ -779,14 +848,14 @@ def main() -> int:
             od = out_dir if out_dir else audio.parent
             key = str(audio)
             row = manifest.get(key)
-            # 已转写完成且文稿仍在 → 跳过，不重复花钱
-            if row is not None and row["status"] == "DONE":
+            # 已转写完成且文稿仍在 → 跳过（除非 --overwrite 强制重转，用于统一格式等场景）
+            if row is not None and row["status"] == "DONE" and not args.overwrite:
                 if all(t.exists() for t in compute_targets(audio, od, fmt)):
                     print(f"[跳过] {audio.name}（已转写完成）")
                     continue
                 row["status"] = "PENDING"  # 文稿丢失，重置待处理
             try:
-                transcribe_one(audio, args.lang, args.overwrite, od, fmt, index_cb=index_cb)
+                transcribe_one(audio, args.lang, args.overwrite, od, fmt, index_cb=index_cb, diarization=diar)
                 ok += 1
                 log_line("OK", audio)
                 if row is not None:
