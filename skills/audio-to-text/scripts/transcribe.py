@@ -620,7 +620,10 @@ def main() -> int:
         type=Path,
         help="要处理的音频目录；可多次使用以批量处理多个文件夹（也可用 config.env 的 INPUT_DIRS）",
     )
-    parser.add_argument("--file", type=Path, help="单个音频文件")
+    parser.add_argument(
+        "--file", action="append", type=Path,
+        help="单个音频文件；可多次使用以批量指定多个文件（也可用 --dir 指定整个文件夹）"
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -734,7 +737,8 @@ def main() -> int:
 
     files: list[Path] = []
     if args.file:
-        files = [args.file.resolve()]
+        # 支持多次 --file 累加（ argparse 已用 append 收集成列表）
+        files.extend(p.resolve() for p in args.file)
     for d in args.dir:
         d = d.resolve()
         if not d.is_dir():
