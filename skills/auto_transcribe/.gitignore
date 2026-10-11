@@ -1,0 +1,19 @@
+# 含有本地路径/隐私，禁止提交
+.env
+config.env
+
+# 本地虚拟环境（run.sh 自动创建，含第三方依赖，勿提交）
+.venv/
+
+# Python 编译缓存
+__pycache__/
+*.pyc
+
+# 运行产生的状态/日志（可选：不入库）
+*.state.json
+state.json
+run.log
+
+# 运行产物：未转写清单 / 顽固失败清单（含本地路径，不入库）
+pending_not_transcribed.txt
+skipped_stubborn.txt

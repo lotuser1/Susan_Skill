@@ -1,0 +1,4 @@
+interface:
+  display_name: "auto_transcribe"
+  short_description: "把本地录音批量上传到通义听悟网页版转写（开启多人讨论/说话人分离），上传前核对是否已成功，幂等跳过已完成的文件"
+  default_prompt: "使用 $auto_transcribe 完成它所解决的任务，并按可观察标准检查结果。"
