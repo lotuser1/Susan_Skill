@@ -3,6 +3,7 @@ name: tingwu-export
 description: 把通义听悟账户上已有的录音转写稿批量下载成本地 markdown（含说话人分离与时间戳），支持多账户串行、断点续跑、防风控限速；下载后先落「00 待分类」，再由 LLM 按医美七大板块归类。适用于已用 auto-transcribe 上传录音到通义听悟转写完成、需要把云端文稿取回本地建知识库的场景。
 category: 采集转写
 tier: free
+ability: 导出听悟转写稿
 ---
 
 # tingwu-export：通义听悟转写稿导出

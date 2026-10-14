@@ -1,0 +1,13 @@
+# Susan 体系已发布的正式能力调用名（目录名 / frontmatter 的 name）
+#
+# 用途：list-skills.py 的兜底白名单。
+# 正常情况下，Skill 靠 frontmatter 里的 `ability` 字段被识别为 Susan 体系；
+# 万一哪个 Skill 漏写了 ability，只要名字在这个清单里，仍然能被发现（并会告警）。
+#
+# 新增 Skill 时：先在 SKILL.md 的 frontmatter 写 `ability: 中文能力名`，再把调用名加到这里。
+# 下线 Skill 时：从这里删掉，它就不会再被主入口路由到。
+
+audio-to-text
+auto-transcribe
+tingwu-export
+ma-risk-check
