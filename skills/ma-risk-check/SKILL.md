@@ -4,6 +4,7 @@ description: 检查医美文案能不能发。扫描广告法违禁词、平台�
 category: 内容合规
 tier: free
 ability: 合规文案审查
+version: 1.0.0
 ---
 
 # ma-risk-check · 医美文案合规检查

@@ -4,6 +4,7 @@ description: 把通义听悟账户上已有的录音转写稿批量下载成本�
 category: 采集转写
 tier: free
 ability: 导出听悟转写稿
+version: 1.0.0
 ---
 
 # tingwu-export：通义听悟转写稿导出

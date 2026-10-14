@@ -4,6 +4,7 @@ description: 通过浏览器自动化把本地录音批量上传到「通义听�
 category: 采集转写
 tier: free
 ability: 录音转文字并区分发言人
+version: 1.0.0
 ---
 
 

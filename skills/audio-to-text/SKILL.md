@@ -4,6 +4,7 @@ description: 把本地音频文件批量转成文字稿：上传到百炼自有�
 category: 采集转写
 tier: free
 ability: 录音转文字
+version: 1.0.0
 ---
 
 # audio-to-text

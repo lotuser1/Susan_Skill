@@ -1,0 +1,31 @@
+{
+  "updated": "2026-10-14",
+  "notes": "主入口新增版本检查：能发现漏装和没覆盖成功的旧版能力",
+  "skills": {
+    "audio-to-text": {
+      "ability": "录音转文字",
+      "version": "1.0.0",
+      "tier": "free"
+    },
+    "auto-transcribe": {
+      "ability": "录音转文字并区分发言人",
+      "version": "1.0.0",
+      "tier": "free"
+    },
+    "ma-risk-check": {
+      "ability": "合规文案审查",
+      "version": "1.0.0",
+      "tier": "free"
+    },
+    "tingwu-export": {
+      "ability": "导出听悟转写稿",
+      "version": "1.0.0",
+      "tier": "free"
+    }
+  },
+  "susan": {
+    "ability": "能力总入口",
+    "version": "1.1.0",
+    "tier": "free"
+  }
+}

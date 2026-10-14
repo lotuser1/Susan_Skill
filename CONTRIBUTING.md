@@ -18,7 +18,7 @@ skills/<skill-name>/     # 目录名：小写英文 + 连字符，如 ma-risk-ch
 
 ---
 
-## 二、SKILL.md 的 frontmatter（必填五个字段）
+## 二、SKILL.md 的 frontmatter（必填六个字段）
 
 ```yaml
 ---
@@ -27,6 +27,7 @@ ability: 合规文案审查         # 中文能力名，主入口按它路由
 description: 一句话说明它做什么、什么情况下用。   # 这段决定 Agent 会不会选中它，写「用户会怎么说」
 category: 内容合规            # 大类：入口 / 采集转写 / 内容合规 / 内容生产 / 聊客成交 / 美学设计 / 团队搭建
 tier: free                   # free=免费 | core=299 | pro=3980 | vip=29800
+version: 1.0.0               # 版本号，学员端靠它判断装的是不是旧版
 ---
 ```
 
@@ -79,7 +80,7 @@ bash run.sh --help        # 或按 SKILL.md 里写的用法跑一遍
 
 必须验证：**成功路径 + 至少一个失败路径**（比如缺凭证、文件不存在）。
 
-### 4. 注册到主入口（改三处，缺一不可）
+### 4. 注册到主入口（改四处，缺一不可）
 
 1. **能力清单加一行**（`skills/susan/SKILL.md`）：只写中文能力名，不要写目录名
 
@@ -90,6 +91,8 @@ bash run.sh --help        # 或按 SKILL.md 里写的用法跑一遍
 2. **确认 frontmatter 的 `ability`** 和上面表格里的能力名**一字不差**
 
 3. **把调用名加进 `skills/susan/references/official-skills.txt`**（漏写 `ability` 时的兜底白名单）
+
+4. **确认 frontmatter 有 `version: 1.0.0`**（版本检查靠它发现旧版，不写会被当成 v0.0.0）
 
 > 主入口的路由表不写目录名。目录名由 `list-skills.py` 从本地实际文件里读出来，
 > 这样重命名目录不会打断路由。
@@ -109,7 +112,7 @@ git push
 ## 五、提交前检查清单
 
 - [ ] 目录名 = `SKILL.md` 的 `name`，且用连字符
-- [ ] frontmatter 五个字段齐全（含 `ability`），分隔符是 `---`
+- [ ] frontmatter 六个字段齐全（含 `ability` 和 `version`），分隔符是 `---`
 - [ ] description 写的是用户口语，不是技术名词
 - [ ] `ability` 与 `susan` 能力清单里的名字**一字不差**
 - [ ] 调用名已加进 `skills/susan/references/official-skills.txt`
@@ -123,7 +126,49 @@ git push
 
 ---
 
-## 六、隐私红线（违反即泄露，无法撤回）
+## 六、改完一个 Skill，怎么发版
+
+学员手上的文件不会自己变新。改完之后走这三步，他下次用才能发现旧版：
+
+### 1. 改版本号
+
+| 改了什么 | 怎么加 |
+|---|---|
+| 规则库 / 词库 / 流程 | 小版本 +1：`1.0.0 → 1.1.0` |
+| 只改错别字、补充说明 | 修订号 +1：`1.0.0 → 1.0.1` |
+| 能力重做 | 大版本 +1：`1.x → 2.0.0` |
+
+### 2. 记更新日志（母库）
+
+在 `../Susan_Skill_Pro/updates.json` 里加一条，写**学员能感知的变化**：
+
+```json
+{"ability": "合规文案审查", "version": "1.1.0", "changes": "新增视频号限流词 32 个"}
+```
+
+✗ 不要写"优化代码结构"这种他看不出价值的话。打包时会自动生成 `UPDATES.md` 给他看。
+
+### 3. 重新打包发出去
+
+```bash
+cd ../Susan_Skill_Pro
+bash pack.sh --tier pro --name 张三
+```
+
+包里自动带新的 `versions.json`，学员端 `check-update.py` 下次就能发现旧版。
+
+### 免费层额外一步：更新远端清单
+
+```bash
+python3 scripts/gen-update-json.py --note "这次改了什么"
+git add UPDATE.json && git commit -m "chore: 更新远端版本清单" && git push
+```
+
+这个脚本**只写免费层**，付费能力自动跳过——公开仓库不暴露 3980 / 29800 的能力清单。
+
+---
+
+## 七、隐私红线（违反即泄露，无法撤回）
 
 公开仓库里的东西**删了也会留在 git 历史里**。以下三类绝对不能提交：
 

@@ -138,6 +138,7 @@ def discover():
                 "description": (meta.get("description") or "").strip(),
                 "category": meta.get("category", "").strip(),
                 "tier": (meta.get("tier") or "free").strip().lower(),
+                "version": (meta.get("version") or "").strip(),
                 "path": str(child / "SKILL.md"),
             }
 
@@ -167,11 +168,18 @@ def build(level, license_data, only_ability=None):
                 "tier_label": TIER_LABEL.get(tier, tier),
                 "level": tl,
                 "usable": usable,
+                "version": entry["version"] or "0.0.0",
                 "path": entry["path"],
                 "description": short,
             }
         )
     return items, warnings
+
+
+def self_version() -> str:
+    """读主入口自身的版本号（本 Skill 目录的 SKILL.md）。"""
+    meta = parse_frontmatter(SELF_SKILLS_ROOT / SELF_NAME / "SKILL.md") or {}
+    return (meta.get("version") or "0.0.0").strip() or "0.0.0"
 
 
 def render_text(items, level, license_data, warnings):
@@ -180,7 +188,7 @@ def render_text(items, level, license_data, warnings):
     else:
         head = "授权：未找到 license.json，按免费用户处理 · level 0"
 
-    lines = [head, ""]
+    lines = [f"主入口版本：v{self_version()}", head, ""]
     if not items:
         lines.append("（本地没有发现任何 Susan 能力）")
         return "\n".join(lines)
@@ -189,7 +197,9 @@ def render_text(items, level, license_data, warnings):
     lines.append("")
     for it in items:
         flag = "可用" if it["usable"] else "档位不足"
-        lines.append(f"- 能力名：{it['ability']}  [{flag} · {it['tier_label']}]")
+        lines.append(
+            f"- 能力名：{it['ability']}  [{flag} · {it['tier_label']}]  v{it['version']}"
+        )
         lines.append(f"  调用名：{it['name']}")
         lines.append(f"  路径：{it['path']}")
         lines.append(f"  说明：{it['description']}")
