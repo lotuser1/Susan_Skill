@@ -1,0 +1,15 @@
+# 本地配置（可能含密钥/路径，绝不入库）
+config.env
+.env
+
+# 运行时产物
+state/
+logs/
+samples/
+pending_not_transcribed.txt
+skipped_stubborn.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/

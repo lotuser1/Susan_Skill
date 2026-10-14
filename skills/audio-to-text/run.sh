@@ -57,7 +57,7 @@ if python3 -c "import requests" 2>/dev/null; then
 elif [ -x "$SCRIPT_DIR/.venv/bin/python" ] && "$SCRIPT_DIR/.venv/bin/python" -c "import requests" 2>/dev/null; then
   PY="$SCRIPT_DIR/.venv/bin/python"
 else
-  for cand in "$SCRIPT_DIR/.venv/bin/python" "/Users/songzi/.workbuddy/binaries/python/envs/default/bin/python3"; do
+  for cand in "$SCRIPT_DIR/.venv/bin/python"; do
     if [ -x "$cand" ] && "$cand" -c "import requests" 2>/dev/null; then
       PY="$cand"; break
     fi

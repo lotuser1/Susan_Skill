@@ -37,10 +37,7 @@ if python3 -c "import websocket" 2>/dev/null; then
 elif [ -x "$SCRIPT_DIR/.venv/bin/python" ] && "$SCRIPT_DIR/.venv/bin/python" -c "import websocket" 2>/dev/null; then
   PY="$SCRIPT_DIR/.venv/bin/python"
 else
-  CAND="/Users/songzi/.workbuddy/binaries/python/envs/default/bin/python3"
-  if [ -x "$CAND" ] && "$CAND" -c "import websocket" 2>/dev/null; then
-    PY="$CAND"
-  fi
+  :  # 未找到可用解释器，交由下方自动创建 .venv 兜底
 fi
 if [ -z "$PY" ]; then
   echo ">>> 检测到缺少 websocket-client，正在创建本地虚拟环境并安装（首次稍慢）..."

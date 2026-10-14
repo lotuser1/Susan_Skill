@@ -1,6 +1,8 @@
 ---
 name: audio-to-text
 description: 把本地音频文件批量转成文字稿：上传到百炼自有文件服务后调用阿里云百炼语音识别API，逐个转写、断点续传、输出文字稿（默认 .doc，可配为 .md / both）。用户有大量本地音频(本地/网盘下载后)需要变成文字稿以做知识库时使用。无需配置OSS。
+category: 采集转写
+tier: free
 ---
 
 # audio-to-text

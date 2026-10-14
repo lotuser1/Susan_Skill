@@ -1,70 +1,119 @@
 # Susan Skill 集合仓库（Monorepo）
 
-一个**不断新增的多 Skill 仓库**。所有面向「医美设计行业」的 AI 能力都放在 `skills/` 目录下，每个 Skill 自包含（各有自己的 `SKILL.md` + `scripts/` + `references/`），互不依赖。
+面向**医美行业**的 AI 能力集合。所有 Skill 自包含，互不依赖。
 
-当前包含的 Skill：
+安装后**不用记 Skill 名字**，直接说你要做什么，主入口 `susan` 会自动路由。
 
-| Skill             | 能力                                                | 目录                      |
-| ----------------- | ------------------------------------------------- | ----------------------- |
-| **audio-to-text** | 本地音频批量转文字稿（上传百炼文件服务，无需OSS → 百炼语音识别 → 输出.doc，断点续传） | `skills/audio-to-text/` |
-| **auto_transcribe** | 浏览器自动化把本地录音批量上传到「通义听悟」网页版转写（开启多人讨论/说话人分离）；**上传前先核对每个文件是否已在听悟转写成功，幂等跳过已完成的文件**，避免重复转写与重复计费 | `skills/auto_transcribe/` |
+---
 
-> **两个转写 Skill 怎么选？**
-> - `audio-to-text`：走**阿里云百炼 API** 直接调 ASR，无需浏览器、无说话人分离，输出 `.doc` 文字稿。
-> - `auto_transcribe`：走**通义听悟网页版**（浏览器自动化），核心卖点是「多人讨论/说话人分离（区分不同发言人）」和「网页批量上传」。它需要你本机先运行 `skills/auto_transcribe/start_chrome.sh` 启动带调试端口的 Chrome 并扫码登录，之后才能通过 CDP 接管窗口。
->
-> 两者都具备**幂等续跑**能力：重跑时只处理未完成的文件，不会重复转写已成功的录音。
-
-## 安装（一条命令装全部）
+## 快速开始
 
 ```bash
 npx -y skills add lotuser1/Susan_Skill -g --all
 ```
 
-> 这是你的真实安装命令：GitHub 用户名 `lotuser1`，仓库 `Susan_Skill`。此命令会安装仓库 `skills/` 下**所有** Skill，以后新增的 Skill 也会一并被装上，安装命令不用改。
+装完后直接说人话：
+
+- 「帮我把这些录音转成文字」
+- 「这段小红书文案能发吗，会不会违规」
+- 「刚聊完一个顾客，帮我整理成面诊记录」
+- 「我这次聊客哪里没聊好」
+
+主入口会判断该交给哪个 Skill。
+
+---
+
+## Skill 清单
+
+### 入口
+
+| Skill | 做什么 |
+|---|---|
+| **`susan`** | 总入口。听懂你的需求 → 路由到对应 Skill。**本身不产出内容** |
+
+### 采集转写（把素材弄进来）
+
+| Skill | 做什么 | 什么时候用它 |
+|---|---|---|
+| **`audio-to-text`** | 本地音频批量转文字稿（阿里云百炼 ASR） | 只要文字稿，要批量、能断点续跑 |
+| **`auto-transcribe`** | 浏览器自动化批量上传到通义听悟转写 | 要**区分谁在说话**（说话人分离） |
+| **`tingwu-export`** | 把听悟云端已有的转写稿批量下载到本地 | 稿子已在听悟，要拉下来建知识库 |
+
+> 三者都支持**幂等续跑**：重跑只处理未完成的，不会重复计费。
+
+### 内容生产与合规
+
+| Skill | 做什么 | 状态 |
+|---|---|---|
+| **`ma-risk-check`** | 医美文案合规审查：广告法违禁词 + 平台限流词 + 上下文语义违规 | 开发中 |
+| `ma-title` | 爆款标题生成 | 规划中 |
+| `ma-consult-note` | 面诊记录结构化 | 规划中 |
+| `ma-postcare` | 术后须知生成 | 规划中 |
+| `ma-humanize` | 去 AI 味 | 规划中 |
+
+---
+
+## 关于分层
+
+本仓库是**公开免费层**，只放「公开法规 + 结构化能力」类 Skill。
+
+基于一手素材沉淀的诊断类能力（聊客复盘诊断、美学设计方案生成等）属于付费课程配套，
+放在私有仓库，**不在本仓库**。你在使用 `susan` 时如果问到这类能力，会看到获取说明。
+
+---
 
 ## 仓库结构
 
 ```text
-lotuser1/Susan_Skill/                      # 仓库根
-├── README.md                        # 本说明（安装 + 使用）
-├── CONTRIBUTING.md                  # 如何新增一个 Skill（给维护者/你自己）
-├── .gitignore
-└── skills/                          # 所有 Skill 都放这里
-    ├── audio-to-text/               # 示例：第一个 Skill
-    │   ├── SKILL.md
-    │   ├── agents/openai.yaml
-    │   └── scripts/transcribe.py
-    └── <你以后新增的-skill>/         # 新增位置：往这里加文件夹即可
+Susan_Skill/
+├── README.md                 # 本说明
+├── CONTRIBUTING.md           # 如何新增一个 Skill
+└── skills/
+    ├── susan/                # 主入口（路由）
+    ├── audio-to-text/        # ┐
+    ├── auto-transcribe/      # ├ 采集转写
+    ├── tingwu-export/        # ┘
+    ├── ma-risk-check/        # ┐
+    └── <新增的 skill>/        # ┴ 内容生产与合规
 ```
 
-## 如何使用某个 Skill
+每个 Skill 目录：
 
-### 方式一：在客户端里直接说（由 Agent 调用）
+```text
+<skill-name>/
+├── SKILL.md          # 必填：能力说明 + 使用条件 + 关键流程
+├── scripts/          # 可选：重复且确定的操作脚本
+├── references/       # 可选：按需读取的条件性知识
+└── assets/           # 可选：模板/素材
+```
 
-安装后，直接对支持 Agent Skills 的客户端说：
+---
 
-- 转写音频：`使用 $audio-to-text 完成它所解决的任务，并按可观察标准检查结果。`
+## 隐私边界（重要）
 
-### 方式二：自己手动跑（推荐，可批量配置）
+本仓库**不含任何真实客户内容**。
 
-1. 进入 `skills/audio-to-text/` 目录
-2. `cp config.env.example config.env`，用文本编辑器填入你的百炼 Key 和要处理的文件夹（`INPUT_DIRS`）
-3. `python3 -m pip install requests`（只需一次）
-4. `bash run.sh` —— 会自动批量转写 `INPUT_DIRS` 里的所有文件夹
+- 所有转写稿样例均为**脱敏结构示例**，不含真实录音内容
+- 所有 Skill 的 `config.env`（含 API Key）已被 gitignore，绝不入库
+- 所有脚本中的路径均为相对路径或环境变量，不含任何个人目录
 
-### ⚠️ 给别人用的关键提醒
+如果你 fork 本仓库，**请同样遵守**：不要把真实面诊录音、客户信息、个人路径提交进来。
+一旦推送到公开仓库，即使删除也会留在 git 历史里，无法撤回。
 
-本仓库**不含任何 Key**（`config.env` 已被忽略，不会上传）。别人安装后，**必须用自己的阿里云百炼账号申请 Key** 填进自己的 `config.env`，不能用你的。完整步骤见 `skills/audio-to-text/SKILL.md`。
+---
 
-每个 Skill 的详细用法见其所在目录的 `SKILL.md`。
+## 凭证安全
 
-## 发布规范
+Skill 不内置任何密钥。需要凭证的 Skill 会提供 `config.env.example`，
+你自己复制成 `config.env` 填入**你自己申请**的 Key。
 
-- **凭证安全**：所有 API Key / AccessKey 一律走环境变量，绝不写进代码或仓库。
-- **隐私边界**：仓库只发布运行所需文件；本地样本、密钥、运行记录、私密内容绝不入库。
-- **只发布自包含 Skill**：每个 Skill 文件夹独立可用，不依赖仓库其他部分。
+```bash
+cp config.env.example config.env
+# 用文本编辑器填入你的 Key
+```
 
-## 与知识库衔接
+---
 
-转写出的文字稿可交给 `/dbs-knowledge` 搭建按主题归档的知识库，形成「音频 → 文字稿 → 知识库 → 各 Skill 取用」闭环。
+## 新增 Skill
+
+见 `CONTRIBUTING.md`。新增后**安装命令不用改**，一条命令自动包含新 Skill。

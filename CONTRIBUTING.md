@@ -1,72 +1,125 @@
-# 如何新增一个 Skill（Monorepo）
+# 如何新增一个 Skill
 
-本仓库是**多 Skill 集合仓库**。新增一个 Skill 不需要改任何现有代码，只要按下面的步骤往 `skills/` 下加一个文件夹。
+本仓库是多 Skill 集合仓库。新增 Skill **不需要改任何现有代码**，往 `skills/` 下加一个文件夹即可。
 
-## 目录结构：每个 Skill 自包含
+---
+
+## 一、目录规范
 
 ```text
-skills/
-└── your-skill-name/               # 小写英文、数字、连字符
-    ├── SKILL.md                   # 必填：能力说明 + 使用条件 + 关键流程
-    ├── agents/openai.yaml        # 可选：UI 元数据
-    ├── scripts/                  # 可选：重复且确定的操作脚本
-    ├── references/               # 可选：按需读取的条件性知识
-    └── assets/                   # 可选：进入交付的模板/素材
+skills/<skill-name>/     # 目录名：小写英文 + 连字符，如 ma-risk-check
+├── SKILL.md             # 必填
+├── scripts/             # 可选：重复且确定的操作
+├── references/          # 可选：按需读取的条件性知识
+└── assets/              # 可选：模板/素材
 ```
 
-## 新增步骤
+**命名用连字符，不要用下划线。**（`auto-transcribe` ✓ / `auto_transcribe` ✗）
 
-### 1. 用脚手架生成（推荐）
+---
+
+## 二、SKILL.md 的 frontmatter（必填四个字段）
+
+```yaml
+---
+name: ma-risk-check          # 必须与目录名完全一致
+description: 一句话说明它做什么、什么情况下用。   # 这段决定 Agent 会不会选中它，写「用户会怎么说」
+category: 内容合规            # 大类：入口 / 采集转写 / 内容合规 / 内容生产 / 聊客成交 / 美学设计 / 团队搭建
+tier: free                   # free=公开仓库 | pro=付费层（不放本仓库）
+---
+```
+
+**description 怎么写**：不要写技术名词，写**用户真实会说的需求**。
+
+```
+✗ description: 基于规则引擎的医美广告合规检测模块
+✓ description: 这段文案能不能发？扫描广告法违禁词和平台限流词，
+               用户写完小红书/抖音文案担心违规或被限流时使用
+```
+
+---
+
+## 三、SKILL.md 正文至少包含
+
+1. **一句话定义**：解决什么、**不解决什么**（边界比能力更重要）
+2. **使用前提**：需要什么凭证 / 依赖 / 材料
+3. **关键行为与边界**：只读不删、凭证不硬编码、安全边界
+4. **用法**：具体命令或调用方式
+5. **完成条件**：怎么判断它做完了
+
+---
+
+## 四、新增步骤
+
+### 1. 建目录
 
 ```bash
-python3 /home/user/.agents/skills/dbs-skill-maker/scripts/init_skill_project.py \
-  your-skill-name \
-  --output /home/user/Doubao/chats/38445015441618946/audio-transcribe-github/skills \
-  --description "一句话说明：这个skill做什么、在什么情况下用" \
-  --task "它反复解决的问题" \
-  --workflow "关键工作动作1" \
-  --workflow "关键工作动作2" \
-  --done "可观察的完成证据1"
+mkdir -p skills/<skill-name>/{scripts,references}
 ```
 
-### 2. 补全 SKILL.md
+### 2. 写 SKILL.md
 
-把脚手架生成的初稿补成完整文档，至少包含：
+按上面第二节模板写。**注意：frontmatter 的分隔符是 `---`，不要写成 `\---`**（会导致 Skill 无法被解析）。
 
-- **一句话定义**：这个 Skill 解决什么、不解决什么
-- **使用前提**：需要什么凭证/依赖/材料
-- **关键行为与边界**：只读不删、凭证不硬编码、安全边界
-- **用法**：具体命令或调用方式
-- **完成条件**：怎么判断它做完了
-
-### 3. 校验
+### 3. 本机实测
 
 ```bash
-python3 /home/user/.agents/skills/dbs-skill-maker/scripts/validate_skill_project.py \
-  /home/user/Doubao/chats/38445015441618946/audio-transcribe-github/skills/your-skill-name
+cd skills/<skill-name>
+bash run.sh --help        # 或按 SKILL.md 里写的用法跑一遍
 ```
 
-### 4. 确认无误后提交
+必须验证：**成功路径 + 至少一个失败路径**（比如缺凭证、文件不存在）。
 
-只暂存明确文件，不要用 `git add .` / `git add -A`：
+### 4. 在主入口注册表
+
+编辑 `skills/susan/SKILL.md` 的路由表，加一行：
+
+| 用户可能会这么说 | 交给谁 | 层级 |
+|---|---|---|
+| 这段文案能不能发 | `ma-risk-check` | free |
+
+> 只改这张表，不用改任何代码。
+
+### 5. 提交
+
+只暂存明确文件，**不要用 `git add .` / `git add -A`**：
 
 ```bash
-git add skills/your-skill-name
-git commit -m "feat: 新增 your-skill-name 技能"
+git add skills/<skill-name> skills/susan/SKILL.md
+git commit -m "feat: 新增 <skill-name>"
+git push
 ```
 
-## 关键规则
+---
 
-1. **自包含**：每个 Skill 不依赖仓库其他部分，拿到该文件夹就能独立使用。
-2. **凭证不写死**：所有 Key 走环境变量，绝不入库。
-3. **隐私边界**：本地样本、密钥、运行记录、私密内容绝不提交。
-4. **每个 Skill 都要能通过结构校验**才提交。
-5. **一条命令装全部**：新增 Skill 后，别人的安装命令 `npx -y skills add lotuser1/Susan_Skill -g --all` 无需改动，自动包含新 Skill。
+## 五、提交前检查清单
 
-## 检查清单（提交前）
+- [ ] 目录名 = `SKILL.md` 的 `name`，且用连字符
+- [ ] frontmatter 四个字段齐全，分隔符是 `---`
+- [ ] description 写的是用户口语，不是技术名词
+- [ ] 已在 `skills/susan/SKILL.md` 路由表注册
+- [ ] `category` 与 `tier` 填写正确
+- [ ] 本机实测通过（成功 + 失败路径）
+- [ ] **没有**本机绝对路径（应写成相对路径或环境变量）
+- [ ] **没有** API Key / 密钥
+- [ ] **没有**真实客户内容（转写稿、姓名、联系方式、案例图）
 
-- [ ] `skills/<name>/SKILL.md` 存在且 description 能区分近邻任务
-- [ ] 目录名与 SKILL.md 的 `name` 一致
-- [ ] scripts 已运行验证（成功路径 + 至少一个失败路径）
-- [ ] 没有未完成占位符 / 本机绝对路径 / 密钥
-- [ ] 通过了 `validate_skill_project.py`（0 提醒）
+---
+
+## 六、隐私红线（违反即泄露，无法撤回）
+
+公开仓库里的东西**删了也会留在 git 历史里**。以下三类绝对不能提交：
+
+1. **真实客户内容**：录音转写稿、面诊对话、姓名、联系方式、术前术后图
+   → 需要示例时用**脱敏结构样例**（见 `skills/tingwu-export/samples/`）
+2. **凭证**：API Key、AccessKey、Cookie、Token
+   → 一律走 `config.env`（已 gitignore）+ `config.env.example`（提交这个）
+3. **个人路径**：`/Users/xxx/...` 这类绝对路径
+   → 写成相对路径或 `os.environ.get("XXX", "./默认值")`
+
+提交前自查：
+
+```bash
+grep -rn "/Users/" --include="*.py" --include="*.sh" --include="*.md" skills/ | grep -v "/state/" | grep -v "/logs/"
+# 应该没有输出
+```

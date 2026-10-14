@@ -1,0 +1,4 @@
+interface:
+  display_name: "tingwu-export（通义听悟转写稿导出）"
+  short_description: "把通义听悟账户上已有的录音转写稿批量下载成本地 markdown（含说话人分离），支持多账户串行、断点续跑"
+  default_prompt: "使用 $tingwu-export，把我通义听悟账户上的转写稿下载到本地知识库目录。"
