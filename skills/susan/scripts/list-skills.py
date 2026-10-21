@@ -96,6 +96,23 @@ def load_official_names():
     }
 
 
+def load_manifest_names():
+    """从 versions.json 读安装包里的能力清单。
+
+    用途：frontmatter 坏了、没有 ability 时，靠它判断"这个目录确实是我们家的"，
+    从而报"装坏了"而不是静默跳过。
+    """
+    for root in SCAN_ROOTS:
+        p = root / "versions.json"
+        if p.exists():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            return set((data.get("skills") or {}).keys())
+    return set()
+
+
 def discover():
     """扫描所有 skills 目录，返回 (条目列表, 告警列表)。
 
@@ -105,7 +122,13 @@ def discover():
     """
     found = {}
     warnings = []
+    broken = []
     official = load_official_names()
+    manifest_names = load_manifest_names()
+
+    def is_ours(name):
+        """判断某个目录是不是 Susan 体系的。公告名单 + 版本清单双保险。"""
+        return name in official or name in manifest_names
 
     def consider(root: Path):
         if not root or not root.is_dir():
@@ -115,9 +138,22 @@ def discover():
                 continue
             if child.name == SELF_NAME:
                 continue
-            meta = parse_frontmatter(child / "SKILL.md")
-            if not meta:
+
+            smd = child / "SKILL.md"
+            meta = parse_frontmatter(smd) if smd.exists() else None
+
+            # 装坏的情况必须说出来，不能静默当成"没装"。
+            # 否则学员买了付费能力，却被回答"这是付费内容"——最难排查的一类事故。
+            if meta is None:
+                if is_ours(child.name):
+                    why = (
+                        "目录在，但里面没有 SKILL.md"
+                        if not smd.exists()
+                        else "SKILL.md 解析失败（首行必须是 ---）"
+                    )
+                    broken.append({"dir": child.name, "why": why})
                 continue
+
             name = meta.get("name") or child.name
             if name == SELF_NAME:
                 continue
@@ -126,10 +162,11 @@ def discover():
 
             ability = meta.get("ability", "").strip()
             if not ability:
-                # 没有 ability 字段：只有白名单里的才认，且告警
-                if name not in official:
+                # 没有 ability 字段：白名单/版本清单里的才认，并且必须告警
+                if not is_ours(name):
                     continue
                 warnings.append(f"{name}：SKILL.md 缺 ability 字段，已按调用名兜底收录")
+                broken.append({"dir": child.name, "why": "缺 ability 字段，主入口按中文能力名路由不到它"})
                 ability = name
 
             found[name] = {
@@ -139,18 +176,18 @@ def discover():
                 "category": meta.get("category", "").strip(),
                 "tier": (meta.get("tier") or "free").strip().lower(),
                 "version": (meta.get("version") or "").strip(),
-                "path": str(child / "SKILL.md"),
+                "path": str(smd),
             }
 
     consider(SELF_SKILLS_ROOT)
     for root in SCAN_ROOTS:
         consider(root)
 
-    return found, warnings
+    return found, warnings, broken
 
 
 def build(level, license_data, only_ability=None):
-    found, warnings = discover()
+    found, warnings, broken = discover()
     items = []
     for entry in sorted(found.values(), key=lambda x: (TIER_LEVEL.get(x["tier"], 0), x["ability"])):
         tier = entry["tier"]
@@ -173,7 +210,7 @@ def build(level, license_data, only_ability=None):
                 "description": short,
             }
         )
-    return items, warnings
+    return items, warnings, broken
 
 
 def self_version() -> str:
@@ -182,7 +219,7 @@ def self_version() -> str:
     return (meta.get("version") or "0.0.0").strip() or "0.0.0"
 
 
-def render_text(items, level, license_data, warnings):
+def render_text(items, level, license_data, warnings, broken):
     if license_data:
         head = f"授权：{license_data.get('licensee', '未知')} · 档位 {TIER_LABEL.get(str(license_data.get('tier', 'free')).lower(), '免费')} · level {level}"
     else:
@@ -205,6 +242,12 @@ def render_text(items, level, license_data, warnings):
         lines.append(f"  说明：{it['description']}")
         lines.append("")
     lines.append("用法：按「能力名」判断用户要什么，用「调用名」或「路径」去调用它。")
+    if broken:
+        lines.append("")
+        lines.append("装坏的能力（目录在，但主入口用不了）：")
+        for b in broken:
+            lines.append(f"- {b['dir']}：{b['why']}")
+        lines.append("  → 告诉用户重新解压安装包覆盖这个目录；或跑 scripts/doctor.py 看完整检查")
     if warnings:
         lines.append("")
         lines.append("注意：")
@@ -219,12 +262,18 @@ def main():
     args = ap.parse_args()
 
     level, license_data = load_license_level()
-    items, warnings = build(level, license_data, args.ability)
+    items, warnings, broken = build(level, license_data, args.ability)
 
     if args.json:
         print(
             json.dumps(
-                {"level": level, "license": license_data, "items": items, "warnings": warnings},
+                {
+                    "level": level,
+                    "license": license_data,
+                    "items": items,
+                    "warnings": warnings,
+                    "broken": broken,
+                },
                 ensure_ascii=False,
                 indent=2,
             )
@@ -232,9 +281,16 @@ def main():
     else:
         if args.ability and not items:
             print(f"本地没有安装「{args.ability}」这个能力。")
+            if broken:
+                print()
+                print(f"但注意到有 {len(broken)} 个能力目录装坏了，可能就是你问的这个：")
+                for b in broken:
+                    print(f"- {b['dir']}：{b['why']}")
+                print("→ 先让用户重新解压安装包覆盖这些目录，再确认能不能用。")
+                return
             print("它可能需要单独获取，或者根本没装。按 susan 路由表里的档位给出对应引导。")
             return
-        print(render_text(items, level, license_data, warnings))
+        print(render_text(items, level, license_data, warnings, broken))
 
 
 if __name__ == "__main__":

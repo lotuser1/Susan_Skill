@@ -157,6 +157,20 @@ bash pack.sh --tier pro --name 张三
 
 包里自动带新的 `versions.json`，学员端 `check-update.py` 下次就能发现旧版。
 
+### 4. 发出去之前跑一次体检
+
+```bash
+cd /tmp && unzip -q ~/path/to/dist/Susan_Skill_3980_张三_20261022.zip
+python3 /tmp/Susan_Skill_3980_张三_20261022/install.py --target /tmp/pkgtest
+```
+
+输出里出现 `[失败]` 就**不要发**——那说明同一个包在学员机器上也会出同样的问题。
+没有失败项再发给学员。
+
+> 体检脚本 `doctor.py` 会检查：susan 在不在、有没有多套一层、每个 skill 有没有
+> SKILL.md、frontmatter 能否解析、有没有 ability 且与能力清单一致、有没有 version、
+> license/versions 是否和 susan 同层。
+
 ### 免费层额外一步：更新远端清单
 
 ```bash

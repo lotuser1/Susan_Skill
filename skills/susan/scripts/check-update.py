@@ -84,7 +84,7 @@ def load_manifest():
 
 def local_versions():
     """本地已装 skill -> {ability, version, tier}。含主入口自身。"""
-    found, _ = _ls.discover()
+    found, _, _ = _ls.discover()
     out = {}
     for entry in found.values():
         out[entry["name"]] = {
