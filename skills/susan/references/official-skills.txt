@@ -13,3 +13,4 @@ tingwu-export
 ma-risk-check
 ma-consult-note
 ma-title-forge
+ma-deai
