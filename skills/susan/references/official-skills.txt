@@ -11,3 +11,5 @@ audio-to-text
 auto-transcribe
 tingwu-export
 ma-risk-check
+ma-consult-note
+ma-title-forge
